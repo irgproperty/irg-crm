@@ -10,4 +10,4 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "irg-crm"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "a3e3a212-545a-427f-8927-aa7828607f07"
