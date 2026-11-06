@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+*.db
+*.sqlite
+*.zip
+dump*.sql
+data/

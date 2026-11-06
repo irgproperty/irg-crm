@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IRG CRM</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#1c1c1a;--mut:#6d6a63;--line:#e3e0d8;--acc:#1f3a4d;--acc2:#b08d57;--ok:#2e7d4f;--bad:#b3392f}
+@media(prefers-color-scheme:dark){:root{--bg:#161715;--card:#202220;--ink:#ece9e2;--mut:#9b978d;--line:#34372f;--acc:#8fb3c9;--acc2:#c9a56a}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+header{display:flex;gap:4px;align-items:center;background:var(--acc);padding:0 16px;position:sticky;top:0;z-index:5}
+header b{color:#fff;margin-right:18px;letter-spacing:.08em}
+header a{color:#dfe8ee;text-decoration:none;padding:13px 12px;font-weight:500}header a.on{background:rgba(255,255,255,.14);color:#fff}
+header .sp{flex:1}header span{color:#cdd9e0;font-size:12px}
+main{max-width:1200px;margin:0 auto;padding:18px 16px 60px}
+h1{font-size:20px;margin:0 0 14px}h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:14px}
+.grid{display:grid;gap:14px}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:800px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+input,select,textarea,button{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+textarea{width:100%;min-height:80px}input[type=text],input[type=number],input[type=date],input[type=search],input:not([type]),select{width:100%}
+.bar input,.bar select{width:auto}
+button{cursor:pointer}button.p{background:var(--acc);color:#fff;border-color:var(--acc)}button.d{color:var(--bad)}button.s{padding:3px 8px;font-size:12px}
+table{width:100%;border-collapse:collapse}th{text-align:left;font-size:12px;color:var(--mut);padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}tr.l:hover{background:rgba(127,127,127,.08);cursor:pointer}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:rgba(127,127,127,.15);margin-right:4px}
+.tag.ok{background:rgba(46,125,79,.18);color:var(--ok)}.tag.bad{background:rgba(179,57,47,.15);color:var(--bad)}.tag.w{background:rgba(176,141,87,.22)}
+.mut{color:var(--mut)}.f{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}.f label{display:block;font-size:12px;color:var(--mut);margin-bottom:2px}
+.thumb{width:64px;height:48px;object-fit:cover;border-radius:4px;background:#ddd;display:block}
+.ph{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}.ph div{position:relative;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--card)}
+.ph img{width:100%;height:92px;object-fit:cover;display:block}.ph .c{display:flex;justify-content:space-between;padding:3px 6px;font-size:11px}.ph .hid img{opacity:.35}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chips label{border:1px solid var(--line);border-radius:14px;padding:3px 10px;cursor:pointer;font-size:13px;display:inline-flex;gap:6px;align-items:center;background:var(--card)}
+.chips label.on{background:var(--acc);color:#fff;border-color:var(--acc)}.chips input{display:none}
+.note{border-left:3px solid var(--acc2);padding:4px 10px;margin:8px 0;white-space:pre-wrap;word-break:break-word}.note small{display:block;color:var(--mut)}
+.pg{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:12px}
+.stat{font-size:28px;font-weight:600}.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--acc);color:#fff;padding:9px 16px;border-radius:6px;z-index:9}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px}.tabs a{padding:8px 14px;cursor:pointer;color:var(--mut)}.tabs a.on{color:var(--ink);border-bottom:2px solid var(--acc2)}
+</style></head><body>
+<header><b>IRG CRM</b><a href="#/">Dashboard</a><a href="#/contacts">Contacts</a><a href="#/properties">Properties</a><a href="#/tasks">Tasks</a><a href="#/settings">Settings</a><div class="sp"></div><span id="me"></span></header>
+<main id="app"></main>
+<script>
+const $=(s,r=document)=>r.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api=async(p,o={})=>{const r=await fetch('/api'+p,{method:o.method||'GET',headers:{'content-type':'application/json'},body:o.body?JSON.stringify(o.body):undefined});const j=await r.json();if(!r.ok)throw new Error(j.error);return j};
+const toast=t=>{const e=document.createElement('div');e.className='toast';e.textContent=t;document.body.append(e);setTimeout(()=>e.remove(),1800)};
+const eur=n=>n?new Intl.NumberFormat('en-IE',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n):'';
+const opts=(arr,sel,blank='')=>`<option value="">${blank}</option>`+arr.map(x=>{const v=x.code??x.id??x,l=x.label??x.name??x;return `<option value="${esc(v)}" ${String(v)===String(sel??'')?'selected':''}>${esc(l)}</option>`}).join('');
+let L={},F=[];const st={};
+async function boot(){L=await api('/lookups');F=await api('/features');$('#me').textContent=(await api('/me')).email;router()}
+function router(){const h=location.hash.slice(1)||'/';document.querySelectorAll('header a').forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+h||(h!=='/'&&a.getAttribute('href').length>2&&h.startsWith(a.getAttribute('href').slice(1)))));
+ const m=(re)=>h.match(re);let r;
+ if(h==='/')dash();else if(h==='/contacts')contacts();else if(r=m(/^\/contacts\/new$/))contactNew();else if(r=m(/^\/contacts\/(\d+)$/))contact(+r[1]);
+ else if(h==='/properties')props();else if(h==='/properties/new')propNew();else if(r=m(/^\/properties\/(\d+)$/))prop(+r[1]);
+ else if(h==='/tasks')tasks();else if(h==='/settings')settings();else $('#app').innerHTML='<p>Not found</p>'}
+addEventListener('hashchange',router);
+
+async function dash(){const d=await api('/dashboard');$('#app').innerHTML=`<h1>Dashboard</h1><div class="grid g4">
+<div class="card"><h2>Contacts</h2><div class="stat">${d.contacts.n.toLocaleString()}</div><div class="mut">${d.contacts.sellers} sellers</div></div>
+<div class="card"><h2>Properties</h2><div class="stat">${d.properties.n}</div><div class="mut">${d.properties.active} active · ${d.properties.online} online</div></div>
+<div class="card"><h2>Top origins</h2>${d.origins.map(o=>`<div>${esc(o.origin)} <span class="mut">${o.n}</span></div>`).join('')}</div>
+<div class="card"><h2>Newest contacts</h2>${d.recent.map(c=>`<div><a href="#/contacts/${c.id}">${esc(c.name)}</a> <span class="mut">${esc(c.created_at||'')}</span></div>`).join('')}</div></div>`}
+
+function pager(total,page,per,key,fn){const pages=Math.ceil(total/per);return `<div class="pg"><button ${page<=1?'disabled':''} onclick="${fn}(${page-1})">‹</button><span>${page} / ${pages||1} · ${total.toLocaleString()}</span><button ${page>=pages?'disabled':''} onclick="${fn}(${page+1})">›</button></div>`}
+
+async function contacts(page=1){const s=st.c||={};const qs=new URLSearchParams({page,...Object.fromEntries(Object.entries(s).filter(([,v])=>v))});const d=await api('/contacts?'+qs);
+ $('#app').innerHTML=`<h1>Contacts</h1><div class="bar"><input id="q" type="search" placeholder="Name, email, phone, id…" value="${esc(s.q||'')}" style="min-width:260px">
+ <select id="o">${opts(L.origin||[],s.origin,'All origins')}</select><select id="u">${opts(L.users,s.user,'All agents')}</select>
+ <label><input type="checkbox" id="sl" ${s.seller?'checked':''}> sellers</label><label><input type="checkbox" id="by" ${s.buyer?'checked':''}> buyers</label>
+ <span class="sp" style="flex:1"></span><a href="#/contacts/new"><button class="p">+ New contact</button></a></div>
+ <div class="card"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Origin</th><th>Agent</th><th>Added</th></tr>${d.rows.map(c=>`<tr class="l" onclick="location.hash='#/contacts/${c.id}'"><td>${esc(c.name)} ${c.is_seller?'<span class="tag w">seller</span>':''}${c.is_buyer?'<span class="tag">buyer</span>':''}${c.active?'':'<span class="tag bad">inactive</span>'}<div class="mut">${esc(c.country||'')}</div></td><td>${esc(c.email||'')}</td><td>${esc(c.phone||'')}</td><td>${esc(c.origin||'')}</td><td>${esc(c.user||'')}</td><td>${esc(c.created_at||'')}</td></tr>`).join('')}</table>${pager(d.total,d.page,d.per,'c','contacts')}</div>`;
+ const go=()=>{st.c={q:$('#q').value,origin:$('#o').value,user:$('#u').value,seller:$('#sl').checked?1:'',buyer:$('#by').checked?1:''};contacts(1)};
+ let t;$('#q').oninput=()=>{clearTimeout(t);t=setTimeout(go,350)};['o','u','sl','by'].forEach(i=>$('#'+i).onchange=go);const q=$('#q');q.focus();q.setSelectionRange(q.value.length,q.value.length)}
+
+const contactForm=c=>`<div class="f"><div><label>Name</label><input id="n" value="${esc(c.name||'')}"></div>
+<div><label>Country</label><input id="co" value="${esc(c.country||'')}"></div>
+<div><label>Origin</label><select id="or">${opts(L.origin||[],c.origin,'—')}</select></div>
+<div><label>Agent</label><select id="us">${opts(L.users,c.assigned_user_id,'—')}</select></div>
+<div><label>Language</label><input id="la" value="${esc(c.language||'')}"></div>
+<div><label>GDPR consent</label><select id="gd"><option value="">Unknown</option><option value="1" ${c.gdpr_consent===1?'selected':''}>Yes</option><option value="0" ${c.gdpr_consent===0?'selected':''}>No</option></select></div></div>
+<div class="f" style="margin-top:10px"><div><label>Emails (one per line)</label><textarea id="em" style="min-height:60px">${esc((c.emails||[]).map(e=>e.email).join('\n'))}</textarea></div>
+<div><label>Phones (one per line)</label><textarea id="ph" style="min-height:60px">${esc((c.phones||[]).map(e=>e.phone).join('\n'))}</textarea></div>
+<div><label>&nbsp;</label><label style="color:var(--ink)"><input type="checkbox" id="se" ${c.is_seller?'checked':''}> Seller</label> <label style="color:var(--ink)"><input type="checkbox" id="bu" ${c.is_buyer?'checked':''}> Buyer</label> <label style="color:var(--ink)"><input type="checkbox" id="ac" ${c.active!==0?'checked':''}> Active</label></div></div>`;
+const readContact=()=>({name:$('#n').value,country:$('#co').value,origin:$('#or').value,assigned_user_id:$('#us').value||null,language:$('#la').value,gdpr_consent:$('#gd').value===''?null:+$('#gd').value,is_seller:+$('#se').checked,is_buyer:+$('#bu').checked,active:+$('#ac').checked,emails:$('#em').value.split('\n').map(s=>s.trim()).filter(Boolean),phones:$('#ph').value.split('\n').map(s=>s.trim()).filter(Boolean)});
+function contactNew(){$('#app').innerHTML=`<h1>New contact</h1><div class="card">${contactForm({})}<p><button class="p" id="sv">Create</button></p></div>`;$('#sv').onclick=async()=>{const r=await api('/contacts',{method:'POST',body:readContact()});location.hash='#/contacts/'+r.id}}
+
+async function contact(id){const c=await api('/contacts/'+id);
+ $('#app').innerHTML=`<div class="bar"><a href="#/contacts">← Contacts</a></div><h1>${esc(c.name)} <span class="mut" style="font-weight:400">#${c.id}</span> ${c.import_flags?c.import_flags.split(',').map(f=>`<span class="tag w">${esc(f)}</span>`).join(''):''}</h1>
+ ${c.duplicates.length?`<div class="card">Shares an email with: ${c.duplicates.map(d=>`<a href="#/contacts/${d.id}">${esc(d.name)}</a>`).join(', ')}</div>`:''}
+ <div class="card"><h2>Details</h2>${contactForm(c)}<p><button class="p" id="sv">Save</button> <span class="mut">Added ${esc(c.created_at||'')}${c.created_reliable?'':' (Proppy bulk date, unreliable)'}</span></p></div>
+ <div class="grid g2"><div class="card"><h2>Properties owned</h2>${c.owned.map(p=>`<div><a href="#/properties/${p.id}">Ref ${esc(p.reference)}</a> ${esc(p.property_type||'')} ${esc(p.locality||p.city||'')} ${eur(p.price)} <span class="tag">${p.sold?'sold':esc(p.status)}</span></div>`).join('')||'<span class="mut">None</span>'}</div>
+ <div class="card"><h2>Buyer searches</h2>${c.searches.map(s=>`<div class="note"><b>${eur(s.price_min)||'—'} – ${eur(s.price_max)||'—'}</b>${s.bedrooms_min?' · '+s.bedrooms_min+'+ bed':''}${s.locations?' · '+esc(s.locations):''}${s.property_types?' · '+esc(s.property_types):''}<small>${esc(s.notes||'')}</small><button class="s" onclick="matches(${s.id})">Matches</button> <button class="s d" onclick="delSearch(${s.id},${id})">Delete</button><div id="m${s.id}"></div></div>`).join('')}
+ <div class="f" style="margin-top:8px"><input id="smin" type="number" placeholder="Min €"><input id="smax" type="number" placeholder="Max €"><input id="sbed" type="number" placeholder="Min beds"><input id="sloc" placeholder="Locations (comma sep.)"><input id="styp" placeholder="Types (comma sep.)"></div><p><button id="ss">Add search</button></p></div></div>
+ <div class="card"><h2>Tasks</h2>${c.events.map(e=>`<div>${e.done_at?'✓':'○'} ${esc(e.title)} <span class="mut">${esc(e.due_at||'')}</span> ${e.done_at?'':`<button class="s" onclick="doneEv(${e.id},${id})">Done</button>`}</div>`).join('')}
+ <div class="bar" style="margin-top:8px"><input id="et" placeholder="New task / follow-up…" style="flex:1"><input id="ed" type="date"><button id="ea">Add</button></div></div>
+ <div class="card"><h2>Notes</h2><textarea id="nt" placeholder="Add a note…"></textarea><p><button class="p" id="na">Add note</button></p>
+ ${c.notes.map(n=>`<div class="note">${esc(n.body)}<small>${esc(n.created_at||'')} ${esc(n.user||'')} ${esc(n.source||'')} <a href="" onclick="delNote(${n.id},${id});return false">delete</a></small></div>`).join('')}</div>
+ <p><button class="d" id="dl">Delete contact</button></p>`;
+ $('#sv').onclick=async()=>{await api('/contacts/'+id,{method:'PUT',body:readContact()});toast('Saved')};
+ $('#na').onclick=async()=>{if(!$('#nt').value.trim())return;await api(`/contacts/${id}/notes`,{method:'POST',body:{body:$('#nt').value}});contact(id)};
+ $('#ea').onclick=async()=>{if(!$('#et').value)return;await api('/events',{method:'POST',body:{contact_id:id,title:$('#et').value,due_at:$('#ed').value}});contact(id)};
+ $('#ss').onclick=async()=>{await api(`/contacts/${id}/searches`,{method:'POST',body:{price_min:$('#smin').value,price_max:$('#smax').value,bedrooms_min:$('#sbed').value,locations:$('#sloc').value,property_types:$('#styp').value}});await api('/contacts/'+id,{method:'PUT',body:{is_buyer:1}});contact(id)};
+ $('#dl').onclick=async()=>{if(confirm('Delete this contact permanently?')){await api('/contacts/'+id,{method:'DELETE'});location.hash='#/contacts'}}}
+async function matches(sid){const r=await api(`/searches/${sid}/matches`);$('#m'+sid).innerHTML=r.map(p=>`<div><a href="#/properties/${p.id}">${esc(p.reference)}</a> ${esc(p.property_type)} ${esc(p.locality||p.city||'')} ${p.bedrooms||''}bd ${eur(p.price)}</div>`).join('')||'<span class="mut">No active matches</span>'}
+async function delSearch(s,id){await api('/searches/'+s,{method:'DELETE'});contact(id)}
+async function delNote(n,id){if(confirm('Delete note?')){await api('/notes/'+n,{method:'DELETE'});contact(id)}}
+async function doneEv(e,id){await api(`/events/${e}/done`,{method:'POST'});contact(id)}
+async function tasks(){const r=await api('/events');$('#app').innerHTML=`<h1>Open tasks</h1><div class="card">${r.map(e=>`<div>○ ${esc(e.title)} <span class="mut">${esc(e.due_at||'')}</span> — <a href="#/contacts/${e.contact_id}">${esc(e.contact||'')}</a> <button class="s" onclick="doneEv(${e.id},0).then(tasks)">Done</button></div>`).join('')||'<span class="mut">Nothing open</span>'}</div>`}
+
+async function props(page=1){const s=st.p||={};const qs=new URLSearchParams({page,...Object.fromEntries(Object.entries(s).filter(([,v])=>v))});const d=await api('/properties?'+qs);
+ $('#app').innerHTML=`<h1>Properties</h1><div class="bar"><input id="q" type="search" placeholder="Ref, area, name, id…" value="${esc(s.q||'')}" style="min-width:240px"><select id="s"><option value="">All</option>${['active','pending','inactive','sold'].map(x=>`<option ${s.status===x?'selected':''}>${x}</option>`).join('')}</select>
+ <select id="t">${opts(L.property_type||[],s.type,'All types')}</select><label><input type="checkbox" id="on" ${s.online?'checked':''}> online only</label><span style="flex:1"></span><a href="#/properties/new"><button class="p">+ New property</button></a></div>
+ <div class="card"><table><tr><th></th><th>Ref</th><th>Property</th><th>Price</th><th>Status</th><th>Owner</th></tr>${d.rows.map(p=>`<tr class="l" onclick="location.hash='#/properties/${p.id}'"><td>${p.photo?`<img class="thumb" loading="lazy" src="${esc(p.photo)}?width=160">`:'<div class="thumb"></div>'}</td><td><b>${esc(p.reference)}</b></td><td>${esc(p.property_type||'')} ${esc(p.typology||'')}<div class="mut">${esc([p.zone,p.locality,p.city].filter(Boolean).join(', '))}</div></td><td>${eur(p.price)}</td><td><span class="tag ${p.status==='active'&&!p.sold?'ok':''}">${p.sold?'sold':esc(p.status)}</span>${p.visible_on_website?'<span class="tag w">online</span>':''}</td><td class="mut">${esc(p.owners||'')}</td></tr>`).join('')}</table>${pager(d.total,d.page,d.per,'p','props')}</div>`;
+ const go=()=>{st.p={q:$('#q').value,status:$('#s').value,type:$('#t').value,online:$('#on').checked?1:''};props(1)};let t;$('#q').oninput=()=>{clearTimeout(t);t=setTimeout(go,350)};['s','t','on'].forEach(i=>$('#'+i).onchange=go);const q=$('#q');q.focus();q.setSelectionRange(q.value.length,q.value.length)}
+
+const NUM=['price','price_to','bedrooms','bathrooms','area_house','area_land','area_gross','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee'];
+function propFields(p){const t=(k,l,type='text')=>`<div><label>${l}</label><input id="f_${k}" type="${type}" value="${esc(p[k]??'')}"></div>`,sel=(k,l,a)=>`<div><label>${l}</label><select id="f_${k}">${opts(a,p[k],'—')}</select></div>`,ck=(k,l)=>`<label style="color:var(--ink)"><input type="checkbox" id="f_${k}" ${p[k]?'checked':''}> ${l}</label> `;
+ return `<div class="f">${t('reference','Reference')}${sel('status','Status',['active','pending','inactive'])}${sel('status_reason','Status reason',L.status_reason||[])}${sel('business_type','Business',L.business_type||[])}${sel('property_type','Type',L.property_type||[])}${sel('typology','Typology',L.typology||[])}${sel('condition','Condition',L.condition||[])}
+ ${t('price','Price €','number')}${t('bedrooms','Bedrooms','number')}${t('bathrooms','Bathrooms','number')}${t('area_house','Built area m²','number')}${t('area_land','Plot m²','number')}${t('area_gross','Gross m²','number')}
+ ${t('zone','Zone')}${t('locality','Locality')}${t('city','Concelho')}${t('zipcode','Postcode')}${t('address','Address')}${t('latitude','Latitude','number')}${t('longitude','Longitude','number')}
+ ${t('year_built','Year built','number')}${t('year_renovated','Year renovated','number')}${t('floors','Floors','number')}${t('imi_value','IMI €','number')}${t('condo_fee','Condo fee €','number')}
+ ${sel('energy_rating','Energy rating',(L.energy_rating||[]).map(x=>x.label))}${t('energy_cert_number','Energy cert no.')}${t('habitation_licence','Habitation licence')}${t('registry_number','Registry no.')}
+ ${t('contract_number','Contract no.')}${t('contract_start','Contract start','date')}${t('contract_end','Contract end','date')}${t('commission','Commission')}${t('internal_name','Internal name')}${sel('broker_user_id','Agent',L.users.map(u=>({code:u.id,label:u.name})))}</div>
+ <p>${ck('sold','Sold')}${ck('visible_on_website','Show on website')}${ck('block_export','Block portal export')}${ck('exclusive','Exclusive')}${ck('pre_off_market','Pre/off-market')}${ck('price_visible','Show price')}</p>
+ <label class="mut">Key notes</label><input id="f_key_notes" value="${esc(p.key_notes||'')}"><label class="mut">Internal notes</label><textarea id="f_internal_notes">${esc(p.internal_notes||'')}</textarea>`}
+function readProp(){const o={};document.querySelectorAll('[id^=f_]').forEach(e=>{const k=e.id.slice(2);o[k]=e.type==='checkbox'?+e.checked:(NUM.includes(k)&&e.value!==''?+e.value:e.value===''?null:e.value)});if(o.broker_user_id)o.broker_user_id=+o.broker_user_id;return o}
+function propNew(){$('#app').innerHTML=`<h1>New property</h1><div class="card">${propFields({status:'pending',price_visible:1,business_type:'Venda'})}<p><button class="p" id="sv">Create</button></p></div>`;$('#sv').onclick=async()=>{const r=await api('/properties',{method:'POST',body:readProp()});location.hash='#/properties/'+r.id}}
+const GRP={general:'Features',view:'Views',orientation:'Orientation',proximity:'Nearby'};
+async function prop(id,tab=st.tab||'details'){st.tab=tab;const p=await api('/properties/'+id);
+ const T={details:()=>propFields(p),
+ desc:()=>{const lg=['en','pt','fr','de','es','nl','sv','da','no','pl','ru','it'];return `<div class="bar"><select id="lg">${lg.map(l=>`<option ${l===(st.lang||'en')?'selected':''}>${l}</option>`).join('')}</select><span class="mut">${p.texts.map(t=>t.lang).join(' ')} available</span></div><div id="tx"></div>`},
+ feat:()=>{const have=new Map(p.features.map(f=>[f.feature_id,f.value]));return Object.keys(GRP).map(g=>{const fs=F.filter(f=>f.grp===g&&f.active&&f.kind!=='text'&&f.kind!=='select');return fs.length?`<h2>${GRP[g]}</h2><div class="chips" style="margin-bottom:14px">${fs.map(f=>`<label class="${have.has(f.id)?'on':''}"><input type="checkbox" data-f="${f.id}" ${have.has(f.id)?'checked':''}>${esc(f.label_en||f.label_pt)}${f.custom?' ★':''}</label>`).join('')}</div>`:''}).join('')},
+ photos:()=>`<p class="mut">Order = position on website and in feeds. Untick to hide. ${p.photos.length} photos.</p><div class="ph" id="phs">${p.photos.map((x,i)=>`<div data-id="${x.id}" class="${x.visible?'':'hid'}"><img loading="lazy" src="${esc(x.r2_key?'/img/'+x.r2_key:x.source_url+'?width=300')}"><div class="c"><span>${i+1}</span><span><button class="s" onclick="mv(${i},-1)">◀</button><button class="s" onclick="mv(${i},1)">▶</button> <input type="checkbox" ${x.visible?'checked':''} onchange="this.closest('[data-id]').classList.toggle('hid',!this.checked)"></span></div></div>`).join('')}</div>`,
+ owners:()=>`<div id="ow">${p.owners.map(o=>`<div data-o="${o.id}"><a href="#/contacts/${o.id}">${esc(o.name||'#'+o.id)}</a> <button class="s d" onclick="this.parentNode.remove()">remove</button></div>`).join('')}</div><div class="bar" style="margin-top:8px"><input id="os" placeholder="Search contact to add…"><div id="or2"></div></div>`};
+ $('#app').innerHTML=`<div class="bar"><a href="#/properties">← Properties</a></div><h1>Ref ${esc(p.reference)} <span class="mut" style="font-weight:400">${esc(p.property_type||'')} · ${esc([p.locality,p.city].filter(Boolean).join(', '))} · ${eur(p.price)}</span> <span class="tag ${p.status==='active'?'ok':''}">${p.sold?'sold':esc(p.status)}</span></h1>
+ <div class="tabs">${[['details','Details'],['desc','Descriptions'],['feat','Features'],['photos','Photos'],['owners','Owners']].map(([k,l])=>`<a class="${k===tab?'on':''}" onclick="st.tab='${k}';prop(${id},'${k}')">${l}</a>`).join('')}</div>
+ <div class="card">${T[tab]()}<p><button class="p" id="sv">Save</button> ${p.sold?'':''}<span class="mut">Proppy ID ${p.id} · public URL kept: /property-detail/-/${p.id}</span></p></div>`;
+ if(tab==='desc'){const draw=()=>{const l=$('#lg').value;st.lang=l;const t=p.texts.find(x=>x.lang===l)||{};$('#tx').innerHTML=`<label class="mut">Title</label><input id="t_title" value="${esc(t.title||'')}"><label class="mut">Short description</label><textarea id="t_short">${esc(t.short_description||'')}</textarea><label class="mut">Full description</label><textarea id="t_full" style="min-height:260px">${esc(t.full_description||'')}</textarea>`};$('#lg').onchange=()=>{keep();draw()};const keep=()=>{const l=st.lang||'en';let t=p.texts.find(x=>x.lang===l);if(!t)p.texts.push(t={lang:l});t.title=$('#t_title').value;t.short_description=$('#t_short').value;t.full_description=$('#t_full').value};draw();st.keep=keep}
+ if(tab==='feat')document.querySelectorAll('.chips input').forEach(i=>i.onchange=()=>i.parentNode.classList.toggle('on',i.checked));
+ if(tab==='owners'){let t;$('#os').oninput=()=>{clearTimeout(t);t=setTimeout(async()=>{const r=await api('/contacts?q='+encodeURIComponent($('#os').value));$('#or2').innerHTML=r.rows.slice(0,8).map(c=>`<div><a href="" onclick="addOwner(${c.id},'${esc(c.name).replace(/'/g,'’')}');return false">+ ${esc(c.name)}</a> <span class="mut">${esc(c.email||'')}</span></div>`).join('')},350)}}
+ $('#sv').onclick=async()=>{const b={};
+  if(tab==='details')Object.assign(b,readProp());
+  if(tab==='desc'){st.keep();b.texts=p.texts}
+  if(tab==='feat'){const keepText=p.features.filter(f=>{const d=F.find(x=>x.id===f.feature_id);return d&&(d.kind==='text'||d.kind==='select')||!d});b.features=[...keepText,...[...document.querySelectorAll('.chips input:checked')].map(i=>({feature_id:+i.dataset.f}))]}
+  if(tab==='photos')b.photos=[...document.querySelectorAll('#phs [data-id]')].map(d=>({id:+d.dataset.id,visible:d.querySelector('input').checked}));
+  if(tab==='owners')b.owners=[...document.querySelectorAll('#ow [data-o]')].map(d=>+d.dataset.o);
+  await api('/properties/'+id,{method:'PUT',body:b});toast('Saved');prop(id,tab)}}
+function mv(i,d){const c=$('#phs'),k=[...c.children],j=i+d;if(j<0||j>=k.length)return;d>0?c.insertBefore(k[j],k[i]):c.insertBefore(k[i],k[j]);[...c.children].forEach((e,n)=>{e.querySelector('.c span').textContent=n+1;e.querySelectorAll('button').forEach((b,x)=>b.setAttribute('onclick',`mv(${n},${x?1:-1})`))})}
+function addOwner(id,name){if(document.querySelector(`#ow [data-o="${id}"]`))return;$('#ow').insertAdjacentHTML('beforeend',`<div data-o="${id}">${name} <button class="s d" onclick="this.parentNode.remove()">remove</button></div>`)}
+
+async function settings(){F=await api('/features');L=await api('/lookups');
+ $('#app').innerHTML=`<h1>Settings</h1><div class="grid g2"><div class="card"><h2>Property features</h2><p class="mut">Add your own (★). Existing Proppy ones can be renamed or hidden.</p>
+ <div class="bar"><input id="nf" placeholder="New feature name (English)"><select id="ng">${Object.entries(GRP).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><button class="p" id="nfa">Add</button></div>
+ <table>${F.filter(f=>f.kind!=='text'&&f.kind!=='select').map(f=>`<tr><td><input value="${esc(f.label_en||f.label_pt)}" onchange="renF(${f.id},this.value)"> ${f.custom?'★':''}</td><td class="mut">${GRP[f.grp]||f.grp}</td><td class="mut">${f.used} used</td><td><button class="s" onclick="hideF(${f.id},${f.active?0:1})">${f.active?'Hide':'Show'}</button> ${f.custom||!f.used?`<button class="s d" onclick="delF(${f.id})">Delete</button>`:''}</td></tr>`).join('')}</table></div>
+ <div><div class="card"><h2>Contact origins</h2><div class="chips">${(L.origin||[]).map(o=>`<label>${esc(o.label)}<button class="s d" onclick="delLk('origin','${esc(o.code).replace(/'/g,"\\'")}')">×</button></label>`).join('')}</div><div class="bar" style="margin-top:10px"><input id="no" placeholder="New origin"><button id="noa">Add</button></div></div>
+ <div class="card"><h2>Agents</h2>${L.users.map(u=>`<div>${esc(u.name)}</div>`).join('')}<div class="bar" style="margin-top:8px"><input id="nu" placeholder="Name"><input id="nue" placeholder="Login email"><button id="nua">Add</button></div></div></div></div>`;
+ $('#nfa').onclick=async()=>{if(!$('#nf').value)return;await api('/features',{method:'POST',body:{label_en:$('#nf').value,grp:$('#ng').value}});settings()};
+ $('#noa').onclick=async()=>{if(!$('#no').value)return;await api('/lookups/origin',{method:'POST',body:{label:$('#no').value}});settings()};
+ $('#nua').onclick=async()=>{if(!$('#nu').value)return;await api('/users',{method:'POST',body:{name:$('#nu').value,email:$('#nue').value}});settings()}}
+async function renF(id,v){await api('/features/'+id,{method:'PUT',body:{label_en:v}});toast('Renamed')}
+async function hideF(id,a){await api('/features/'+id,{method:'PUT',body:{active:a}});settings()}
+async function delF(id){if(confirm('Delete feature and remove it from all properties?')){await api('/features/'+id,{method:'DELETE'});settings()}}
+async function delLk(k,c){await api(`/lookups/${k}/${encodeURIComponent(c)}`,{method:'DELETE'});settings()}
+boot();
+</script></body></html>

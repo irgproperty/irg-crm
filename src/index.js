@@ -1,0 +1,219 @@
+// IRG CRM API. Auth: put the whole site behind Cloudflare Access; the worker trusts its header.
+const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { 'content-type': 'application/json' } });
+const PROP_FIELDS = ['reference','status','status_reason','sold','visible_on_website','block_export','exclusive','pre_off_market','business_type','property_type','typology','condition','price','price_to','price_visible','bedrooms','bathrooms','area_house','area_land','area_gross','country','district','city','locality','zone','zipcode','address','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee','energy_rating','energy_cert_number','habitation_licence','registry_number','contract_number','contract_start','contract_end','commission','internal_name','key_notes','internal_notes','broker_user_id'];
+const CONTACT_FIELDS = ['name','country','origin','assigned_user_id','language','active','gdpr_consent','gdpr_consent_date','is_seller','is_buyer','next_event'];
+const now = () => new Date().toISOString().slice(0, 16);
+const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k] === '' ? null : o[k]]));
+
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    const email = req.headers.get('cf-access-authenticated-user-email') || (url.hostname === 'localhost' ? 'dev@local' : null);
+    if (!email) return json({ error: 'unauthorised' }, 401);
+    try { return await route(req, env, url, email); }
+    catch (e) { return json({ error: String(e.message || e) }, 500); }
+  },
+};
+
+async function route(req, env, url, email) {
+  const db = env.DB, m = req.method, p = url.pathname.replace(/^\/api/, '');
+  const q = (s, ...a) => db.prepare(s).bind(...a);
+  const all = async (s, ...a) => (await q(s, ...a).all()).results;
+  const one = (s, ...a) => q(s, ...a).first();
+  const body = async () => (m === 'GET' ? {} : await req.json());
+  let r;
+  const upd = (table, id, data) => {
+    const k = Object.keys(data);
+    if (!k.length) return null;
+    return q(`UPDATE ${table} SET ${k.map(x => x + '=?').join(',')} WHERE id=?`, ...k.map(x => data[x]), id);
+  };
+
+  if (p === '/me') return json({ email });
+
+  if (p === '/dashboard') {
+    const [c, pr, act, rec] = await Promise.all([
+      one('SELECT COUNT(*) n, SUM(is_seller) sellers FROM contacts'),
+      one("SELECT COUNT(*) n, SUM(status='active') active, SUM(visible_on_website) online FROM properties"),
+      all("SELECT origin, COUNT(*) n FROM contacts WHERE origin IS NOT NULL GROUP BY origin ORDER BY n DESC LIMIT 8"),
+      all('SELECT id,name,origin,created_at FROM contacts ORDER BY id DESC LIMIT 8'),
+    ]);
+    return json({ contacts: c, properties: pr, origins: act, recent: rec });
+  }
+
+  if (p === '/lookups') {
+    const rows = await all('SELECT kind,code,label FROM lookups ORDER BY kind,sort,label');
+    const o = {}; rows.forEach(x => (o[x.kind] ||= []).push(x));
+    o.users = await all('SELECT id,name FROM users WHERE active=1 ORDER BY name');
+    return json(o);
+  }
+  if (p === '/lookups' && m === 'POST') {}
+  if ((r = p.match(/^\/lookups\/(\w+)$/)) && m === 'POST') {
+    const b = await body(); await q('INSERT OR IGNORE INTO lookups(kind,code,label) VALUES(?,?,?)', r[1], b.label, b.label).run(); return json({ ok: 1 });
+  }
+  if ((r = p.match(/^\/lookups\/(\w+)\/(.+)$/)) && m === 'DELETE') {
+    await q('DELETE FROM lookups WHERE kind=? AND code=?', r[1], decodeURIComponent(r[2])).run(); return json({ ok: 1 });
+  }
+
+  // ---------- contacts ----------
+  if (p === '/contacts' && m === 'GET') {
+    const s = url.searchParams, page = +(s.get('page') || 1), per = 50;
+    const w = [], a = [];
+    const term = (s.get('q') || '').trim();
+    if (term) {
+      const like = '%' + term + '%';
+      const dig = term.replace(/[^\d]/g, '');
+      w.push('(c.name LIKE ? OR c.id IN (SELECT contact_id FROM contact_emails WHERE email LIKE ?) OR c.id = ?' + (dig.length >= 5 ? ' OR c.id IN (SELECT contact_id FROM contact_phones WHERE phone LIKE ?)' : '') + ')');
+      a.push(like, like, +term || -1); if (dig.length >= 5) a.push('%' + dig + '%');
+    }
+    if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
+    if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
+    if (s.get('seller')) w.push('c.is_seller=1');
+    if (s.get('buyer')) w.push('c.is_buyer=1');
+    const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
+    const total = await one(`SELECT COUNT(*) n FROM contacts c ${where}`, ...a);
+    const rows = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
+      (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
+      (SELECT phone FROM contact_phones WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) phone
+      FROM contacts c LEFT JOIN users u ON u.id=c.assigned_user_id ${where} ORDER BY c.id DESC LIMIT ? OFFSET ?`, ...a, per, (page - 1) * per);
+    return json({ total: total.n, page, per, rows });
+  }
+  if (p === '/contacts' && m === 'POST') {
+    const b = await body();
+    const d = pick(b, CONTACT_FIELDS); d.created_at = now(); d.created_reliable = 1;
+    const id = (await one('SELECT COALESCE(MAX(id),0)+1 n FROM contacts')).n;
+    const k = ['id', ...Object.keys(d)];
+    const st = [q(`INSERT INTO contacts(${k.join(',')}) VALUES(${k.map(() => '?').join(',')})`, id, ...Object.values(d))];
+    (b.emails || []).forEach((e, i) => e && st.push(q('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,?)', id, e.toLowerCase(), i ? 0 : 1)));
+    (b.phones || []).forEach((e, i) => e && st.push(q('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,?)', id, e, e, i ? 0 : 1)));
+    await db.batch(st); return json({ id });
+  }
+  if ((r = p.match(/^\/contacts\/(\d+)$/))) {
+    const id = +r[1];
+    if (m === 'GET') {
+      const c = await one('SELECT * FROM contacts WHERE id=?', id);
+      if (!c) return json({ error: 'not found' }, 404);
+      delete c.proppy_notes_raw;
+      const [emails, phones, notes, owned, searches, events] = await Promise.all([
+        all('SELECT id,email,is_primary FROM contact_emails WHERE contact_id=? ORDER BY is_primary DESC,id', id),
+        all('SELECT id,phone,kind,is_primary FROM contact_phones WHERE contact_id=? ORDER BY is_primary DESC,id', id),
+        all('SELECT n.*,u.name user FROM notes n LEFT JOIN users u ON u.id=n.user_id WHERE contact_id=? ORDER BY created_at DESC,id DESC', id),
+        all('SELECT p.id,p.reference,p.status,p.sold,p.property_type,p.city,p.locality,p.price FROM property_owners o JOIN properties p ON p.id=o.property_id WHERE o.contact_id=?', id),
+        all('SELECT * FROM searches WHERE contact_id=? ORDER BY id DESC', id),
+        all('SELECT * FROM events WHERE contact_id=? ORDER BY COALESCE(due_at,"") DESC', id),
+      ]);
+      const dups = await all('SELECT DISTINCT c.id,c.name FROM contact_emails e JOIN contact_emails f ON f.email=e.email AND f.contact_id<>e.contact_id JOIN contacts c ON c.id=f.contact_id WHERE e.contact_id=?', id);
+      return json({ ...c, emails, phones, notes, owned, searches, events, duplicates: dups });
+    }
+    if (m === 'PUT') {
+      const b = await body(), st = [];
+      const u = upd('contacts', id, pick(b, CONTACT_FIELDS)); if (u) st.push(u);
+      if (b.emails) { st.push(q('DELETE FROM contact_emails WHERE contact_id=?', id)); b.emails.filter(Boolean).forEach((e, i) => st.push(q('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,?)', id, e.trim().toLowerCase(), i ? 0 : 1))); }
+      if (b.phones) { st.push(q('DELETE FROM contact_phones WHERE contact_id=?', id)); b.phones.filter(Boolean).forEach((e, i) => st.push(q('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,?)', id, e.trim(), e.trim(), i ? 0 : 1))); }
+      if (st.length) await db.batch(st); return json({ ok: 1 });
+    }
+    if (m === 'DELETE') { await q('DELETE FROM contacts WHERE id=?', id).run(); return json({ ok: 1 }); }
+  }
+  if ((r = p.match(/^\/contacts\/(\d+)\/notes$/)) && m === 'POST') {
+    const b = await body();
+    await q('INSERT INTO notes(contact_id,property_id,body,source,created_at,user_id) VALUES(?,?,?,?,?,(SELECT id FROM users WHERE email=?))', +r[1], b.property_id || null, b.body, 'crm', now(), email).run();
+    return json({ ok: 1 });
+  }
+  if ((r = p.match(/^\/notes\/(\d+)$/)) && m === 'DELETE') { await q('DELETE FROM notes WHERE id=?', +r[1]).run(); return json({ ok: 1 }); }
+  if ((r = p.match(/^\/contacts\/(\d+)\/searches$/)) && m === 'POST') {
+    const b = await body();
+    await q('INSERT INTO searches(contact_id,price_min,price_max,bedrooms_min,locations,property_types,notes,created_at) VALUES(?,?,?,?,?,?,?,?)', +r[1], b.price_min || null, b.price_max || null, b.bedrooms_min || null, b.locations || null, b.property_types || null, b.notes || null, now()).run();
+    return json({ ok: 1 });
+  }
+  if ((r = p.match(/^\/searches\/(\d+)$/)) && m === 'DELETE') { await q('DELETE FROM searches WHERE id=?', +r[1]).run(); return json({ ok: 1 }); }
+  if ((r = p.match(/^\/searches\/(\d+)\/matches$/))) {
+    const s = await one('SELECT * FROM searches WHERE id=?', +r[1]);
+    const w = ["status='active'", 'sold=0'], a = [];
+    if (s.price_min) { w.push('price>=?'); a.push(s.price_min); }
+    if (s.price_max) { w.push('price<=?'); a.push(s.price_max); }
+    if (s.bedrooms_min) { w.push('bedrooms>=?'); a.push(s.bedrooms_min); }
+    const locs = (s.locations || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (locs.length) { w.push('(' + locs.map(() => '(locality LIKE ? OR city LIKE ? OR zone LIKE ?)').join(' OR ') + ')'); locs.forEach(l => a.push('%' + l + '%', '%' + l + '%', '%' + l + '%')); }
+    const types = (s.property_types || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (types.length) { w.push('property_type IN (' + types.map(() => '?').join(',') + ')'); a.push(...types); }
+    return json(await all(`SELECT id,reference,property_type,city,locality,bedrooms,price FROM properties WHERE ${w.join(' AND ')} ORDER BY price LIMIT 50`, ...a));
+  }
+  if (p === '/events' && m === 'POST') {
+    const b = await body();
+    await q('INSERT INTO events(contact_id,property_id,kind,title,due_at,notes,user_id) VALUES(?,?,?,?,?,?,(SELECT id FROM users WHERE email=?))', b.contact_id, b.property_id || null, b.kind || 'task', b.title, b.due_at || null, b.notes || null, email).run();
+    return json({ ok: 1 });
+  }
+  if ((r = p.match(/^\/events\/(\d+)\/done$/)) && m === 'POST') { await q('UPDATE events SET done_at=? WHERE id=?', now(), +r[1]).run(); return json({ ok: 1 }); }
+  if (p === '/events' && m === 'GET') {
+    return json(await all('SELECT e.*,c.name contact FROM events e LEFT JOIN contacts c ON c.id=e.contact_id WHERE done_at IS NULL ORDER BY COALESCE(due_at,"9") LIMIT 100'));
+  }
+
+  // ---------- properties ----------
+  if (p === '/properties' && m === 'GET') {
+    const s = url.searchParams, page = +(s.get('page') || 1), per = 50, w = [], a = [];
+    const term = (s.get('q') || '').trim();
+    if (term) { w.push('(reference LIKE ? OR city LIKE ? OR locality LIKE ? OR zone LIKE ? OR internal_name LIKE ? OR id=?)'); const l = '%' + term + '%'; a.push(l, l, l, l, l, +term || -1); }
+    const st = s.get('status');
+    if (st === 'sold') w.push('sold=1'); else if (st) { w.push('status=?', 'sold=0'); a.push(st); }
+    if (s.get('online')) w.push('visible_on_website=1');
+    if (s.get('type')) { w.push('property_type=?'); a.push(s.get('type')); }
+    const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
+    const total = await one(`SELECT COUNT(*) n FROM properties ${where}`, ...a);
+    const rows = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
+      (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
+      (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners
+      FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per, (page - 1) * per);
+    return json({ total: total.n, page, per, rows });
+  }
+  if (p === '/properties' && m === 'POST') {
+    const b = await body(), d = pick(b, PROP_FIELDS); d.created_at = now(); d.status ||= 'pending';
+    const id = (await one('SELECT COALESCE(MAX(id),0)+1 n FROM properties')).n;
+    if (!d.reference) d.reference = String(((await one('SELECT MAX(CAST(reference AS INTEGER)) n FROM properties')).n || 0) + 1);
+    const k = ['id', ...Object.keys(d)];
+    await q(`INSERT INTO properties(${k.join(',')}) VALUES(${k.map(() => '?').join(',')})`, id, ...Object.values(d)).run();
+    return json({ id });
+  }
+  if ((r = p.match(/^\/properties\/(\d+)$/))) {
+    const id = +r[1];
+    if (m === 'GET') {
+      const pr = await one('SELECT * FROM properties WHERE id=?', id);
+      if (!pr) return json({ error: 'not found' }, 404);
+      delete pr.raw_json;
+      const [texts, features, photos, owners, notes] = await Promise.all([
+        all('SELECT * FROM property_texts WHERE property_id=?', id),
+        all('SELECT feature_id,value FROM property_features WHERE property_id=?', id),
+        all('SELECT id,position,visible,source_url,r2_key FROM photos WHERE property_id=? ORDER BY position', id),
+        all('SELECT o.contact_id id,c.name FROM property_owners o LEFT JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=?', id),
+        all('SELECT n.*,u.name user FROM notes n LEFT JOIN users u ON u.id=n.user_id WHERE property_id=? ORDER BY created_at DESC', id),
+      ]);
+      return json({ ...pr, texts, features, photos, owners, notes });
+    }
+    if (m === 'PUT') {
+      const b = await body(), st = [];
+      const u = upd('properties', id, pick(b, PROP_FIELDS)); if (u) st.push(u);
+      if (b.features) {
+        st.push(q('DELETE FROM property_features WHERE property_id=?', id));
+        b.features.forEach(f => st.push(q('INSERT OR IGNORE INTO property_features VALUES(?,?,?)', id, f.feature_id, f.value ?? null)));
+      }
+      if (b.texts) b.texts.forEach(t => st.push(q('INSERT INTO property_texts(property_id,lang,title,short_description,full_description) VALUES(?,?,?,?,?) ON CONFLICT(property_id,lang) DO UPDATE SET title=excluded.title,short_description=excluded.short_description,full_description=excluded.full_description', id, t.lang, t.title || null, t.short_description || null, t.full_description || null)));
+      if (b.owners) { st.push(q('DELETE FROM property_owners WHERE property_id=?', id)); b.owners.forEach(o => st.push(q('INSERT OR IGNORE INTO property_owners VALUES(?,?,?)', id, o, null))); st.push(q('UPDATE contacts SET is_seller=1 WHERE id IN (' + (b.owners.length ? b.owners.map(() => '?').join(',') : 'NULL') + ')', ...b.owners)); }
+      if (b.photos) b.photos.forEach((ph, i) => st.push(q('UPDATE photos SET position=?,visible=? WHERE id=? AND property_id=?', i + 1, ph.visible ? 1 : 0, ph.id, id)));
+      if (st.length) await db.batch(st); return json({ ok: 1 });
+    }
+  }
+
+  // ---------- features (custom ones allowed) ----------
+  if (p === '/features' && m === 'GET') return json(await all('SELECT f.*,(SELECT COUNT(*) FROM property_features WHERE feature_id=f.id) used FROM feature_defs f ORDER BY grp,sort,label_pt'));
+  if (p === '/features' && m === 'POST') {
+    const b = await body();
+    const id = (await one('SELECT MAX(MAX(id),100000)+1 n FROM feature_defs')).n;
+    await q('INSERT INTO feature_defs(id,kind,label_pt,label_en,grp,custom) VALUES(?,?,?,?,?,1)', id, b.kind || 'bit', b.label_pt || b.label_en, b.label_en || null, b.grp || 'general').run();
+    return json({ id });
+  }
+  if ((r = p.match(/^\/features\/(\d+)$/))) {
+    if (m === 'PUT') { const b = await body(); await q('UPDATE feature_defs SET label_pt=COALESCE(?,label_pt),label_en=COALESCE(?,label_en),grp=COALESCE(?,grp),active=COALESCE(?,active) WHERE id=?', b.label_pt ?? null, b.label_en ?? null, b.grp ?? null, b.active ?? null, +r[1]).run(); return json({ ok: 1 }); }
+    if (m === 'DELETE') { await db.batch([q('DELETE FROM property_features WHERE feature_id=?', +r[1]), q('DELETE FROM feature_defs WHERE id=?', +r[1])]); return json({ ok: 1 }); }
+  }
+  if (p === '/users' && m === 'POST') { const b = await body(); await q('INSERT INTO users(name,email,role) VALUES(?,?,?)', b.name, b.email || null, b.role || 'agent').run(); return json({ ok: 1 }); }
+
+  return json({ error: 'not found' }, 404);
+}
