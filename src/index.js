@@ -8,6 +8,9 @@ const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    if (url.pathname.startsWith('/api/public/')) {
+      try { return await publicApi(req, env, url); } catch (e) { return json({ error: String(e.message || e) }, 500); }
+    }
     const email = req.headers.get('cf-access-authenticated-user-email') || (url.hostname === 'localhost' ? 'dev@local' : null);
     if (!email) return json({ error: 'unauthorised' }, 401);
     try { return await route(req, env, url, email); }
@@ -215,5 +218,86 @@ async function route(req, env, url, email) {
   }
   if (p === '/users' && m === 'POST') { const b = await body(); await q('INSERT INTO users(name,email,role) VALUES(?,?,?)', b.name, b.email || null, b.role || 'agent').run(); return json({ ok: 1 }); }
 
+  return json({ error: 'not found' }, 404);
+}
+
+// ---------- public API for the website (bypass Cloudflare Access for /api/public/*, protected by SITE_KEY) ----------
+const TYPE_EN = { 'Moradia': 'Villa', 'Moradia Duplex': 'Villa', 'Quinta': 'Villa', 'Moradia Geminada': 'Townhouse', 'Moradia em Banda': 'Townhouse', 'Apartamento': 'Apartment', 'Penthouse': 'Apartment', 'Andar moradia': 'Apartment', 'Terreno': 'Land', 'Terreno urbano': 'Land', 'Terreno rústico': 'Land', 'Loja / comércio': 'Commercial', 'Armazém': 'Commercial', 'Restaurante / snack': 'Commercial', 'Hotel': 'Commercial', 'Prédio': 'Building', 'Empreendimento': 'Development', 'Ruína': 'Ruin' };
+const COND_EN = { 'Novo': 'New', 'Usado': 'Used', 'Renovado': 'Renovated', 'Em construção': 'Under construction', 'Para recuperar': 'To renovate', 'Para renovar': 'To renovate', 'Em planta': 'Off plan', 'Bom': 'Good' };
+const KNOWN_AREAS = ['Quinta do Lago', 'Vale do Lobo', 'Vilamoura', 'São Lourenço', 'Quarteira', 'Almancil'];
+const tidy = (s) => (s || '').replace(/\s*\(.*\)\s*/, '').trim();
+
+async function publicApi(req, env, url) {
+  const key = req.headers.get('x-site-key');
+  if (!env.SITE_KEY || key !== env.SITE_KEY) return json({ error: 'unauthorised' }, 401);
+  const db = env.DB, p = url.pathname.replace('/api/public', '');
+  const all = async (s, ...a) => (await db.prepare(s).bind(...a).all()).results;
+
+  if (p === '/listings' && req.method === 'GET') {
+    const props = await all("SELECT * FROM properties WHERE status='active' AND sold=0 AND visible_on_website=1");
+    const ids = props.map(x => x.id);
+    if (!ids.length) return json([]);
+    const ph = ids.map(() => '?').join(',');
+    const [texts, photos, feats, users] = await Promise.all([
+      all(`SELECT * FROM property_texts WHERE lang='en' AND property_id IN (${ph})`, ...ids),
+      all(`SELECT property_id,source_url,r2_key FROM photos WHERE visible=1 AND property_id IN (${ph}) ORDER BY property_id,position`, ...ids),
+      all(`SELECT pf.property_id,pf.value,f.id,f.kind,f.grp,f.label_en,f.label_pt FROM property_features pf JOIN feature_defs f ON f.id=pf.feature_id WHERE f.active=1 AND pf.property_id IN (${ph})`, ...ids),
+      all('SELECT id,name,email FROM users'),
+    ]);
+    const by = (rows) => rows.reduce((m, r) => ((m[r.property_id] ||= []).push(r), m), {});
+    const T = Object.fromEntries(texts.map(t => [t.property_id, t])), PH = by(photos), FE = by(feats), U = Object.fromEntries(users.map(u => [u.id, u]));
+    const CATS = { general: 'Features', view: 'Views', orientation: 'Orientation', proximity: 'Nearby' };
+    const out = props.map(r => {
+      const t = T[r.id] || {}, type = TYPE_EN[r.property_type] || r.property_type || 'Property';
+      const area = KNOWN_AREAS.includes(r.zone) ? r.zone : tidy(r.locality) || tidy(r.city);
+      const fs = FE[r.id] || [];
+      const categories = {};
+      fs.filter(f => f.kind === 'bit' || f.kind === 'list').forEach(f => (categories[CATS[f.grp] || 'Features'] ||= []).push(f.label_en || f.label_pt));
+      const glance = [];
+      const has = (id) => fs.some(f => f.id === id);
+      if (has(2)) glance.push(['Pool', 'Yes']); if (has(11)) glance.push(['Parking', 'Garage']); if (has(74)) glance.push(['Cooling', 'Air conditioning']);
+      const title = t.title || `${r.bedrooms ? r.bedrooms + '-bedroom ' : ''}${type.toLowerCase()} in ${area}`;
+      const published = r.published_at || r.created_at;
+      return {
+        id: r.id, reference: r.reference || String(r.id), title, status: 'active', badge: null, type, typology: r.typology || '',
+        price: r.price_visible ? r.price : null, bedrooms: r.bedrooms, bathrooms: r.bathrooms,
+        livingArea: r.area_house || null, plotArea: r.area_land || null, totalArea: r.area_gross || null,
+        constructionYear: r.year_built, condition: COND_EN[r.condition] || r.condition || '', energyRating: r.energy_rating || '',
+        location: { area, city: tidy(r.city), region: 'Algarve', lat: r.latitude || null, lng: r.longitude || null },
+        description: (t.full_description || t.short_description || '').split(/\n+/).map(x => x.trim()).filter(Boolean),
+        glance, features: Object.entries(categories).map(([category, items]) => ({ category, items })), featuresFlat: fs.map(f => f.label_en || f.label_pt),
+        photos: (PH[r.id] || []).map((x, i) => ({ url: x.r2_key ? `/img/${x.r2_key}` : x.source_url, alt: `${title}, photo ${i + 1}`, category: '' })),
+        video: null, floorplan: null, agent: null, featured: false,
+        publishedAt: published, updatedAt: null,
+      };
+    });
+    return json(out);
+  }
+
+  if (p === '/leads' && req.method === 'POST') {
+    const b = await req.json();
+    if (!b.email) return json({ error: 'email required' }, 400);
+    const email = String(b.email).trim().toLowerCase().slice(0, 160);
+    const name = String(b.name || email).slice(0, 120), phone = String(b.phone || '').slice(0, 30), msg = String(b.message || '').slice(0, 3000);
+    let c = await db.prepare('SELECT contact_id id FROM contact_emails WHERE email=? LIMIT 1').bind(email).first();
+    const nowIso = new Date().toISOString().slice(0, 16);
+    let id;
+    if (c) id = c.id;
+    else {
+      id = (await db.prepare('SELECT COALESCE(MAX(id),0)+1 n FROM contacts').first()).n;
+      const st = [db.prepare("INSERT INTO contacts(id,name,origin,created_at,created_reliable,gdpr_consent,gdpr_consent_date) VALUES(?,?, 'Website',?,1,1,?)").bind(id, name, nowIso, nowIso),
+        db.prepare('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,1)').bind(id, email)];
+      if (phone) st.push(db.prepare('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,1)').bind(id, phone, phone));
+      await db.batch(st);
+    }
+    let pid = null;
+    if (b.reference) pid = (await db.prepare('SELECT id FROM properties WHERE reference=? LIMIT 1').bind(String(b.reference)).first())?.id || null;
+    const title = b.title || (b.reference ? `Enquiry ${b.reference}` : 'Website enquiry');
+    await db.batch([
+      db.prepare("INSERT INTO notes(contact_id,property_id,body,source,created_at) VALUES(?,?,?,'website',?)").bind(id, pid, `${title}\n${msg}`.trim(), nowIso),
+      db.prepare('INSERT INTO events(contact_id,property_id,kind,title,due_at) VALUES(?,?,?,?,?)').bind(id, pid, 'lead', `Reply: ${title}`, nowIso.slice(0, 10)),
+    ]);
+    return json({ ok: 1, contact: id });
+  }
   return json({ error: 'not found' }, 404);
 }

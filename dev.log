@@ -1,0 +1,52 @@
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProxy environment variables detected. We'll use your proxy for fetch requests.[0m
+
+
+
+ ⛅️ wrangler 4.158.0
+────────────────────
+Your Worker has access to the following bindings:
+Binding                        Resource                  Mode
+env.DB (irg-crm)               D1 Database               local
+env.ASSETS                     Assets                    local
+env.SITE_KEY ("(hidden)")      Environment Variable      local
+
+⎔ Starting local server...
+[wrangler:warn] Unable to fetch the `Request.cf` object! Falling back to a default placeholder...
+Error: Request was cancelled.
+    at new DOMException (node:internal/per_context/domexception:76:18)
+    at makeAppropriateNetworkError (/home/claude/crm-app/node_modules/undici/lib/web/fetch/response.js:488:38)
+    at httpNetworkFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1971:14)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async httpNetworkOrCacheFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1600:29)
+    at async httpFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1142:33)
+    at async mainFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:596:20)
+[wrangler:warn] Unable to fetch the `Request.cf` object! Falling back to a default placeholder...
+Error: Request was cancelled.
+    at new DOMException (node:internal/per_context/domexception:76:18)
+    at makeAppropriateNetworkError (/home/claude/crm-app/node_modules/undici/lib/web/fetch/response.js:488:38)
+    at httpNetworkFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1971:14)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async httpNetworkOrCacheFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1600:29)
+    at async httpFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:1142:33)
+    at async mainFetch (/home/claude/crm-app/node_modules/undici/lib/web/fetch/index.js:596:20)
+Wrangler detected this dev session is running in an AI agent.
+The Local Explorer API is available at http://localhost:8787/cdn-cgi/local/explorer/api
+Useful routes:
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/scheduled?worker=<name> - invoke a Worker's scheduled handler; cron is required (see the OpenAPI schema for the full request)
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/d1/database - D1 databases
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/workflows - Workflows
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+    curl -X POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/clear - clear all captured traces and logs
+If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+  GET http://localhost:8787/cdn-cgi/local/explorer/api - OpenAPI schema
+[wrangler:info] Ready on http://localhost:8787
+[wrangler:info] GET /api/public/listings 200 OK (254ms)
+[wrangler:info] GET /api/public/listings 401 Unauthorized (7ms)
+[wrangler:info] GET /api/public/listings 200 OK (323ms)
+[wrangler:info] POST /api/public/leads 200 OK (23ms)
+[wrangler:info] GET /api/contacts 200 OK (19ms)
