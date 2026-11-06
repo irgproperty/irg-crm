@@ -11,7 +11,7 @@ export default {
     if (url.pathname.startsWith('/api/public/')) {
       try { return await publicApi(req, env, url); } catch (e) { return json({ error: String(e.message || e) }, 500); }
     }
-    const email = req.headers.get('cf-access-authenticated-user-email') || (url.hostname === 'localhost' ? 'dev@local' : null);
+    const email = await accessEmail(req, env, url);
     if (!email) return json({ error: 'unauthorised' }, 401);
     try { return await route(req, env, url, email); }
     catch (e) { return json({ error: String(e.message || e) }, 500); }
@@ -300,4 +300,29 @@ async function publicApi(req, env, url) {
     return json({ ok: 1, contact: id });
   }
   return json({ error: 'not found' }, 404);
+}
+
+// ---------- Cloudflare Access JWT verification (fail closed; localhost dev bypass only) ----------
+let certCache = { at: 0, keys: null };
+const b64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+async function accessEmail(req, env, url) {
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return 'dev@local';
+  const token = req.headers.get('cf-access-jwt-assertion');
+  if (!token || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;
+  try {
+    const [h, p, sig] = token.split('.');
+    const header = JSON.parse(new TextDecoder().decode(b64u(h))), payload = JSON.parse(new TextDecoder().decode(b64u(p)));
+    if (payload.exp * 1000 < Date.now()) return null;
+    const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (!aud.includes(env.ACCESS_AUD) || payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null;
+    if (!certCache.keys || Date.now() - certCache.at > 3600e3) {
+      const r = await fetch(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
+      certCache = { at: Date.now(), keys: (await r.json()).keys };
+    }
+    const jwk = certCache.keys.find((k) => k.kid === header.kid);
+    if (!jwk) return null;
+    const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64u(sig), new TextEncoder().encode(`${h}.${p}`));
+    return ok ? payload.email || null : null;
+  } catch { return null; }
 }
