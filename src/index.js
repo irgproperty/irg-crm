@@ -229,8 +229,9 @@ async function route(req, env, url, email) {
     }));
     const st = results.filter(Boolean);
     if (st.length) await db.batch(st);
-    const left = await one('SELECT COUNT(*) n FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL');
-    return json({ copied: st.length, failed: fails, remaining: left.n, bytes });
+    // only count what is left when this batch came back short (avoids re-scanning the table every call: D1 free tier = 5M row reads/day)
+    const remaining = rows.length < limit ? 0 : 1;
+    return json({ copied: st.length, failed: fails, remaining, bytes });
   }
 
   // ---------- features (custom ones allowed) ----------

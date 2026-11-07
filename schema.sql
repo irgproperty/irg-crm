@@ -173,3 +173,5 @@ CREATE TABLE import_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   level TEXT, entity TEXT, ref TEXT, message TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_photos_todo ON photos(property_id, position) WHERE r2_key IS NULL AND source_url IS NOT NULL;
