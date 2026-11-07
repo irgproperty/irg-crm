@@ -13,6 +13,7 @@ export default {
     }
     const email = await accessEmail(req, env, url);
     if (!email) return json({ error: 'unauthorised' }, 401);
+    if (email.startsWith('__setup__')) return json({ setup: 'Set ACCESS_AUD to this value, then redeploy', ACCESS_AUD: email.slice(9) });
     try { return await route(req, env, url, email); }
     catch (e) { return json({ error: String(e.message || e) }, 500); }
   },
@@ -308,13 +309,13 @@ const b64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')
 async function accessEmail(req, env, url) {
   if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return 'dev@local';
   const token = req.headers.get('cf-access-jwt-assertion');
-  if (!token || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;
+  if (!token || !env.ACCESS_TEAM_DOMAIN) return null;
   try {
     const [h, p, sig] = token.split('.');
     const header = JSON.parse(new TextDecoder().decode(b64u(h))), payload = JSON.parse(new TextDecoder().decode(b64u(p)));
     if (payload.exp * 1000 < Date.now()) return null;
     const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (!aud.includes(env.ACCESS_AUD) || payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null;
+    if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}` || (env.ACCESS_AUD && !aud.includes(env.ACCESS_AUD))) return null;
     if (!certCache.keys || Date.now() - certCache.at > 3600e3) {
       const r = await fetch(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
       certCache = { at: Date.now(), keys: (await r.json()).keys };
@@ -323,6 +324,8 @@ async function accessEmail(req, env, url) {
     if (!jwk) return null;
     const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
     const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64u(sig), new TextEncoder().encode(`${h}.${p}`));
-    return ok ? payload.email || null : null;
+    if (!ok) return null;
+    if (!env.ACCESS_AUD) return '__setup__' + aud.join(',');   // setup mode: show the AUD to a signed-in user so it can be saved
+    return payload.email || null;
   } catch { return null; }
 }
