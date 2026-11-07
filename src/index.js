@@ -214,7 +214,7 @@ async function route(req, env, url, email) {
     if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
     const b = await body(), limit = Math.min(+b.limit || 8, 15), width = +b.width || 2000;
     const rows = await all('SELECT id,property_id,source_url FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL ORDER BY property_id,position LIMIT ?', limit);
-    const fails = [];
+    const fails = []; let bytes = 0;
     const results = await Promise.all(rows.map(async (ph) => {
       try {
         const clean = ph.source_url.split('?')[0];
@@ -222,14 +222,15 @@ async function route(req, env, url, email) {
         if (!res.ok) res = await fetch(clean);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const key = `p/${ph.property_id}/${ph.id}.jpg`;
-        await env.PHOTOS.put(key, res.body, { httpMetadata: { contentType: res.headers.get('content-type') || 'image/jpeg' } });
+        const obj = await env.PHOTOS.put(key, res.body, { httpMetadata: { contentType: res.headers.get('content-type') || 'image/jpeg' } });
+        bytes += obj.size || 0;
         return q('UPDATE photos SET r2_key=? WHERE id=?', key, ph.id);
       } catch (e) { fails.push({ id: ph.id, error: String(e.message || e) }); return null; }
     }));
     const st = results.filter(Boolean);
     if (st.length) await db.batch(st);
     const left = await one('SELECT COUNT(*) n FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL');
-    return json({ copied: st.length, failed: fails, remaining: left.n });
+    return json({ copied: st.length, failed: fails, remaining: left.n, bytes });
   }
 
   // ---------- features (custom ones allowed) ----------
