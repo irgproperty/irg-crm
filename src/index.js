@@ -1,4 +1,6 @@
 import { feedApi } from './feeds.js';
+import { parseLead } from './inbound.js';
+import PostalMime from 'postal-mime';
 // IRG CRM API. Auth: put the whole site behind Cloudflare Access; the worker trusts its header.
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { 'content-type': 'application/json' } });
 const PROP_FIELDS = ['reference','status','status_reason','sold','visible_on_website','block_export','exclusive','pre_off_market','business_type','property_type','typology','condition','price','price_to','price_visible','bedrooms','bathrooms','area_house','area_land','area_gross','country','district','city','locality','zone','zipcode','address','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee','energy_rating','energy_cert_number','habitation_licence','registry_number','contract_number','contract_start','contract_end','commission','internal_name','key_notes','internal_notes','broker_user_id'];
@@ -26,6 +28,14 @@ async function addReads(db, n) {
 }
 
 export default {
+  // Portal enquiry emails routed here by Cloudflare Email Routing
+  async email(message, env, ctx) {
+    const raw = await new Response(message.raw).arrayBuffer();
+    const m = await PostalMime.parse(raw);
+    const lead = parseLead({ from: m.from?.address || message.from, replyTo: m.replyTo?.[0]?.address || '', subject: m.subject, text: m.text || '' });
+    if (!lead) { if (env.FALLBACK_EMAIL) await message.forward(env.FALLBACK_EMAIL); return; }
+    await recordLead(env.DB, { ...lead, title: lead.reference ? `Enquiry ${lead.reference}` : lead.subject, source: 'portal-email' });
+  },
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/api/public/')) {
@@ -309,6 +319,37 @@ const COND_EN = { 'Novo': 'New', 'Usado': 'Used', 'Renovado': 'Renovated', 'Em c
 const KNOWN_AREAS = ['Quinta do Lago', 'Vale do Lobo', 'Vilamoura', 'São Lourenço', 'Quarteira', 'Almancil'];
 const tidy = (s) => (s || '').replace(/\s*\(.*\)\s*/, '').trim();
 
+
+// Shared by the website form and the portal-email intake: match contact by email, else create; add note + follow-up task.
+async function recordLead(db, b) {
+  const email = String(b.email).trim().toLowerCase().slice(0, 160);
+  const name = String(b.name || email).slice(0, 120), msg = String(b.message || '').slice(0, 3000);
+  let phone = String(b.phone || '').replace(/[^\d+]/g, '').slice(0, 30);
+  if (/^351\d{9}$/.test(phone)) phone = '+' + phone;
+  const origin = b.origin || 'Website', src = b.source || 'website';
+  const nowIso = new Date().toISOString().slice(0, 16);
+  let reads = 0, created = false;
+  const c = await db.prepare('SELECT contact_id id FROM contact_emails WHERE email=? LIMIT 1').bind(email).first();
+  let id;
+  if (c) id = c.id;
+  else {
+    id = (await db.prepare('SELECT COALESCE(MAX(id),0)+1 n FROM contacts').first()).n; created = true;
+    const st = [db.prepare("INSERT INTO contacts(id,name,origin,created_at,created_reliable,gdpr_consent,gdpr_consent_date) VALUES(?,?,?,?,1,1,?)").bind(id, name, origin, nowIso, nowIso),
+      db.prepare('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,1)').bind(id, email)];
+    if (phone) st.push(db.prepare('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,1)').bind(id, phone, phone));
+    await db.batch(st);
+  }
+  let pid = null;
+  if (b.reference) pid = (await db.prepare('SELECT id FROM properties WHERE reference=? LIMIT 1').bind(String(b.reference)).first())?.id || null;
+  const title = b.title || (b.reference ? `Enquiry ${b.reference}` : `${origin} enquiry`);
+  const extra = [b.url, b.portalRef && !b.url ? `Portal ref ${b.portalRef}` : ''].filter(Boolean).join('\n');
+  await db.batch([
+    db.prepare('INSERT INTO notes(contact_id,property_id,body,source,created_at) VALUES(?,?,?,?,?)').bind(id, pid, `[${origin}] ${title}\n${msg}${extra ? '\n' + extra : ''}${b.reference && !pid ? `\n(Property ref ${b.reference} not found in CRM)` : ''}`.trim(), src, nowIso),
+    db.prepare('INSERT INTO events(contact_id,property_id,kind,title,due_at) VALUES(?,?,?,?,?)').bind(id, pid, 'lead', `Reply: ${title}`, nowIso.slice(0, 10)),
+  ]);
+  return { id, created, reads };
+}
+
 async function publicApi(req, env, url) {
   if (url.pathname.startsWith('/api/public/img/') && req.method === 'GET') {
     const k = decodeURIComponent(url.pathname.slice('/api/public/img/'.length));
@@ -371,28 +412,10 @@ async function publicApi(req, env, url) {
   if (p === '/leads' && req.method === 'POST') {
     const b = await req.json();
     if (!b.email) return json({ error: 'email required' }, 400);
-    const email = String(b.email).trim().toLowerCase().slice(0, 160);
-    const name = String(b.name || email).slice(0, 120), phone = String(b.phone || '').slice(0, 30), msg = String(b.message || '').slice(0, 3000);
-    let c = await db.prepare('SELECT contact_id id FROM contact_emails WHERE email=? LIMIT 1').bind(email).first();
-    const nowIso = new Date().toISOString().slice(0, 16);
-    let id;
-    if (c) id = c.id;
-    else {
-      id = (await db.prepare('SELECT COALESCE(MAX(id),0)+1 n FROM contacts').first()).n;
-      const st = [db.prepare("INSERT INTO contacts(id,name,origin,created_at,created_reliable,gdpr_consent,gdpr_consent_date) VALUES(?,?, 'Website',?,1,1,?)").bind(id, name, nowIso, nowIso),
-        db.prepare('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,1)').bind(id, email)];
-      if (phone) st.push(db.prepare('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,1)').bind(id, phone, phone));
-      await db.batch(st);
-    }
-    let pid = null;
-    if (b.reference) pid = (await db.prepare('SELECT id FROM properties WHERE reference=? LIMIT 1').bind(String(b.reference)).first())?.id || null;
-    const title = b.title || (b.reference ? `Enquiry ${b.reference}` : 'Website enquiry');
-    await db.batch([
-      db.prepare("INSERT INTO notes(contact_id,property_id,body,source,created_at) VALUES(?,?,?,'website',?)").bind(id, pid, `${title}\n${msg}`.trim(), nowIso),
-      db.prepare('INSERT INTO events(contact_id,property_id,kind,title,due_at) VALUES(?,?,?,?,?)').bind(id, pid, 'lead', `Reply: ${title}`, nowIso.slice(0, 10)),
-    ]);
+    const r = await recordLead(db, { origin: 'Website', name: b.name, email: b.email, phone: b.phone, message: b.message, reference: b.reference, title: b.title, source: 'website' });
+    reads += r.reads;
     await addReads(db, reads);
-    return json({ ok: 1, contact: id });
+    return json({ ok: 1, contact: r.id });
   }
   return json({ error: 'not found' }, 404);
 }

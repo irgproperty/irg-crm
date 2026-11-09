@@ -11,5 +11,8 @@
   "license": "ISC",
   "devDependencies": {
     "wrangler": "^4.158.0"
+  },
+  "dependencies": {
+    "postal-mime": "^4.2.0"
   }
 }

@@ -20,3 +20,7 @@ Until step 8 is done the CRM refuses all requests except /api/public/* (it fails
 - Needs secret `FEED_KEY` (`npx wrangler secret put FEED_KEY`) and the Cloudflare Access bypass policy to include path `/api/feed/*` (same as `/api/public/*`).
 - Includes only: active, not sold, visible on website, not "block export", sale. (Local data: 36 of the 59 website listings; the other 23 have block_export=1.)
 - Rebuilt at most every 30 min (memory cache), ~4.5k D1 reads per rebuild.
+
+## Portal enquiry emails -> CRM
+Parsers in `src/inbound.js` (A Place in the Sun, Idealista, Rightmove tested on real samples in `samples/`; other portals fall back to a generic parser). Worker `email()` handler creates/matches the contact by email, adds a note and a follow-up task, and links the property by your own reference. Run `node test_inbound.mjs` to re-test parsers.
+Needs a Cloudflare Email Routing address on a domain whose DNS is on Cloudflare, pointing at Worker `irg-crm`; Hostinger mailbox portugal@ auto-forwards to it.
