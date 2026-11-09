@@ -15,3 +15,16 @@ Check these before bulk jobs. All reset daily (UTC) or monthly as noted.
 | **Zero Trust (Access)** | 50 users | Plenty. |
 
 If any limit is hit: D1/Workers return errors until the reset time. Upgrading to Workers Paid removes the D1 and Workers limits within minutes.
+
+## Measured D1 reads per action (local test on the real data, 9 Nov)
+| Action | Rows read |
+|---|---|
+| Open CRM (lookups + features) | ~250 (was ~1.3 million) |
+| Dashboard | 9 (cached 1 h; 12.7k when refreshed) |
+| Contacts page | ~400 (first load of the hour ~10k) |
+| Contact search (press Enter) | ~16k |
+| Property list / property page / contact page | ~140 / ~30 / ~25 |
+| Website listings feed | ~4.5k, then cached 5 min |
+
+The CRM shows "DB reads today" in the header and **stops itself at 4.2M** reads (limit is 5M). Public website listings and enquiries keep working after that.
+Rules: no COUNT(*) per request, no polling, no per-keystroke search, index every WHERE/ORDER BY on a table over ~1,000 rows, check with EXPLAIN QUERY PLAN before shipping a query.

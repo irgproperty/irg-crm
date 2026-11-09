@@ -7,6 +7,7 @@
 Your Worker has access to the following bindings:
 Binding                        Resource                  Mode
 env.DB (irg-crm)               D1 Database               local
+env.PHOTOS (irg-photos)        R2 Bucket                 local
 env.ASSETS                     Assets                    local
 env.SITE_KEY ("(hidden)")      Environment Variable      local
 
@@ -45,8 +46,20 @@ Useful routes:
 If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
   GET http://localhost:8787/cdn-cgi/local/explorer/api - OpenAPI schema
 [wrangler:info] Ready on http://localhost:8787
-[wrangler:info] GET /api/public/listings 200 OK (254ms)
-[wrangler:info] GET /api/public/listings 401 Unauthorized (7ms)
-[wrangler:info] GET /api/public/listings 200 OK (323ms)
-[wrangler:info] POST /api/public/leads 200 OK (23ms)
-[wrangler:info] GET /api/contacts 200 OK (19ms)
+[wrangler:info] POST /api/contacts 200 OK (53ms)
+[wrangler:info] PUT /api/contacts/21243 200 OK (10ms)
+[wrangler:info] POST /api/contacts/21243/notes 200 OK (6ms)
+[wrangler:info] POST /api/contacts/21243/searches 200 OK (6ms)
+[wrangler:info] POST /api/events 200 OK (6ms)
+[wrangler:info] PUT /api/properties/13273 200 OK (8ms)
+[wrangler:info] POST /api/properties 200 OK (9ms)
+[wrangler:info] POST /api/features 200 OK (8ms)
+[wrangler:info] POST /api/lookups/origin 200 OK (6ms)
+[wrangler:info] GET /api/lookups 200 OK (11ms)
+[wrangler:info] POST /api/public/leads 200 OK (11ms)
+[wrangler:info] POST /api/public/leads 200 OK (9ms)
+[wrangler:info] GET /api/public/listings 200 OK (67ms)
+[wrangler:info] GET /api/public/listings 401 Unauthorized (5ms)
+[wrangler:info] GET /api/usage 200 OK (4ms)
+[wrangler:info] GET /api/contacts 429 Too Many Requests (12ms)
+[wrangler:info] GET /api/public/listings 200 OK (7ms)

@@ -5,8 +5,27 @@ const CONTACT_FIELDS = ['name','country','origin','assigned_user_id','language',
 const now = () => new Date().toISOString().slice(0, 16);
 const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k] === '' ? null : o[k]]));
 
+
+// ---------- D1 read budget (free tier: 5M rows read / day). Track, show, and stop before the cap. ----------
+const READ_SOFT = 3_000_000, READ_HARD = 4_200_000;
+const memo = {};                                   // per-isolate memory cache
+const memoGet = (k, ttl, fn) => { const m = memo[k]; if (m && Date.now() - m.t < ttl * 1000) return m.v; return (memo[k] = { t: Date.now(), v: fn() }).v; };
+const today = () => new Date().toISOString().slice(0, 10);
+let usageSeen = { day: '', reads: 0, at: 0 };
+async function currentReads(db) {
+  if (usageSeen.day === today() && Date.now() - usageSeen.at < 30000) return usageSeen.reads;
+  const r = await db.prepare('SELECT reads FROM usage WHERE day=?').bind(today()).all();
+  usageSeen = { day: today(), reads: r.results[0]?.reads || 0, at: Date.now() };
+  return usageSeen.reads;
+}
+async function addReads(db, n) {
+  if (!n) return;
+  usageSeen.reads += n;
+  await db.prepare('INSERT INTO usage(day,reads) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET reads=reads+?').bind(today(), n, n).run();
+}
+
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/api/public/')) {
       try { return await publicApi(req, env, url); } catch (e) { return json({ error: String(e.message || e) }, 500); }
@@ -14,16 +33,25 @@ export default {
     const email = await accessEmail(req, env, url);
     if (!email) return json({ error: 'unauthorised' }, 401);
     if (email.startsWith('__setup__')) return json({ setup: 'Set ACCESS_AUD to this value, then redeploy', ACCESS_AUD: email.slice(9) });
-    try { return await route(req, env, url, email); }
+    try { return await route(req, env, url, email, ctx); }
     catch (e) { return json({ error: String(e.message || e) }, 500); }
   },
 };
 
-async function route(req, env, url, email) {
+async function route(req, env, url, email, ctx) {
   const db = env.DB, m = req.method, p = url.pathname.replace(/^\/api/, '');
+  let reads = 0;
   const q = (s, ...a) => db.prepare(s).bind(...a);
-  const all = async (s, ...a) => (await q(s, ...a).all()).results;
-  const one = (s, ...a) => q(s, ...a).first();
+  const run = async (st) => { const r = await st.all(); reads += r.meta?.rows_read || 0; return r.results; };
+  const all = (s, ...a) => run(q(s, ...a));
+  const one = async (s, ...a) => (await run(q(s, ...a)))[0] ?? null;
+  const batch = async (sts) => { const rs = await db.batch(sts); rs.forEach((r) => (reads += r.meta?.rows_read || 0)); return rs; };
+  if (p !== '/usage' && (await currentReads(db)) > READ_HARD) return json({ error: 'Daily database read budget reached (protecting the free limit). It resets at 00:00 UTC.' }, 429);
+  const res = await handle();
+  if (reads) ctx.waitUntil(addReads(db, reads));
+  res.headers.set('x-d1-rows-read', String(reads));
+  return res;
+  async function handle() {
   const body = async () => (m === 'GET' ? {} : await req.json());
   let r;
   const upd = (table, id, data) => {
@@ -32,30 +60,45 @@ async function route(req, env, url, email) {
     return q(`UPDATE ${table} SET ${k.map(x => x + '=?').join(',')} WHERE id=?`, ...k.map(x => data[x]), id);
   };
 
+  const stat = async (key, ttl, fn) => {
+    const r = await one('SELECT value,updated_at FROM stats WHERE key=?', key);
+    if (r && Date.now() - Date.parse(r.updated_at) < ttl * 1000) return JSON.parse(r.value);
+    const v = await fn();
+    await q('INSERT INTO stats(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at', key, JSON.stringify(v), new Date().toISOString()).run();
+    return v;
+  };
+
   if (p === '/me') return json({ email });
+  if (p === '/usage') { const n = await currentReads(db); return json({ reads: n, soft: READ_SOFT, hard: READ_HARD, limit: 5_000_000 }); }
 
   if (p === '/dashboard') {
-    const [c, pr, act, rec] = await Promise.all([
-      one('SELECT COUNT(*) n, SUM(is_seller) sellers FROM contacts'),
-      one("SELECT COUNT(*) n, SUM(status='active') active, SUM(visible_on_website) online FROM properties"),
-      all("SELECT origin, COUNT(*) n FROM contacts WHERE origin IS NOT NULL GROUP BY origin ORDER BY n DESC LIMIT 8"),
-      all('SELECT id,name,origin,created_at FROM contacts ORDER BY id DESC LIMIT 8'),
-    ]);
-    return json({ contacts: c, properties: pr, origins: act, recent: rec });
+    const base = await stat('dashboard', 3600, async () => {
+      const [c, pr, origins] = await Promise.all([
+        one('SELECT COUNT(*) n, SUM(is_seller) sellers FROM contacts'),
+        one("SELECT COUNT(*) n, SUM(status='active') active, SUM(visible_on_website) online FROM properties"),
+        all("SELECT origin, COUNT(*) n FROM contacts WHERE origin IS NOT NULL GROUP BY origin ORDER BY n DESC LIMIT 8"),
+      ]);
+      return { contacts: c, properties: pr, origins };
+    });
+    const recent = await all('SELECT id,name,origin,created_at FROM contacts ORDER BY id DESC LIMIT 8');
+    return json({ ...base, recent, cached: true });
   }
 
-  if (p === '/lookups') {
-    const rows = await all('SELECT kind,code,label FROM lookups ORDER BY kind,sort,label');
-    const o = {}; rows.forEach(x => (o[x.kind] ||= []).push(x));
-    o.users = await all('SELECT id,name FROM users WHERE active=1 ORDER BY name');
+  if (p === '/lookups' && m === 'GET') {
+    const o = await stat('lookups', 600, async () => {
+      const rows = await all('SELECT kind,code,label FROM lookups ORDER BY kind,sort,label');
+      const o = {}; rows.forEach(x => (o[x.kind] ||= []).push(x));
+      o.users = await all('SELECT id,name FROM users WHERE active=1 ORDER BY name');
+      return o;
+    });
     return json(o);
   }
   if (p === '/lookups' && m === 'POST') {}
   if ((r = p.match(/^\/lookups\/(\w+)$/)) && m === 'POST') {
-    const b = await body(); await q('INSERT OR IGNORE INTO lookups(kind,code,label) VALUES(?,?,?)', r[1], b.label, b.label).run(); return json({ ok: 1 });
+    const b = await body(); await q('INSERT OR IGNORE INTO lookups(kind,code,label) VALUES(?,?,?)', r[1], b.label, b.label).run(); await q("DELETE FROM stats WHERE key='lookups'").run(); return json({ ok: 1 });
   }
   if ((r = p.match(/^\/lookups\/(\w+)\/(.+)$/)) && m === 'DELETE') {
-    await q('DELETE FROM lookups WHERE kind=? AND code=?', r[1], decodeURIComponent(r[2])).run(); return json({ ok: 1 });
+    await q('DELETE FROM lookups WHERE kind=? AND code=?', r[1], decodeURIComponent(r[2])).run(); await q("DELETE FROM stats WHERE key='lookups'").run(); return json({ ok: 1 });
   }
 
   // ---------- contacts ----------
@@ -74,12 +117,12 @@ async function route(req, env, url, email) {
     if (s.get('seller')) w.push('c.is_seller=1');
     if (s.get('buyer')) w.push('c.is_buyer=1');
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
-    const total = await one(`SELECT COUNT(*) n FROM contacts c ${where}`, ...a);
-    const rows = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
+    const rows0 = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
       (SELECT phone FROM contact_phones WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) phone
-      FROM contacts c LEFT JOIN users u ON u.id=c.assigned_user_id ${where} ORDER BY c.id DESC LIMIT ? OFFSET ?`, ...a, per, (page - 1) * per);
-    return json({ total: total.n, page, per, rows });
+      FROM contacts c LEFT JOIN users u ON u.id=c.assigned_user_id ${where} ORDER BY c.id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
+    const total = where ? null : (await stat('contacts_total', 3600, async () => (await one('SELECT COUNT(*) n FROM contacts')).n));
+    return json({ total, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
   }
   if (p === '/contacts' && m === 'POST') {
     const b = await body();
@@ -89,7 +132,7 @@ async function route(req, env, url, email) {
     const st = [q(`INSERT INTO contacts(${k.join(',')}) VALUES(${k.map(() => '?').join(',')})`, id, ...Object.values(d))];
     (b.emails || []).forEach((e, i) => e && st.push(q('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,?)', id, e.toLowerCase(), i ? 0 : 1)));
     (b.phones || []).forEach((e, i) => e && st.push(q('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,?)', id, e, e, i ? 0 : 1)));
-    await db.batch(st); return json({ id });
+    await batch(st); return json({ id });
   }
   if ((r = p.match(/^\/contacts\/(\d+)$/))) {
     const id = +r[1];
@@ -113,7 +156,7 @@ async function route(req, env, url, email) {
       const u = upd('contacts', id, pick(b, CONTACT_FIELDS)); if (u) st.push(u);
       if (b.emails) { st.push(q('DELETE FROM contact_emails WHERE contact_id=?', id)); b.emails.filter(Boolean).forEach((e, i) => st.push(q('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,?)', id, e.trim().toLowerCase(), i ? 0 : 1))); }
       if (b.phones) { st.push(q('DELETE FROM contact_phones WHERE contact_id=?', id)); b.phones.filter(Boolean).forEach((e, i) => st.push(q('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,?)', id, e.trim(), e.trim(), i ? 0 : 1))); }
-      if (st.length) await db.batch(st); return json({ ok: 1 });
+      if (st.length) await batch(st); return json({ ok: 1 });
     }
     if (m === 'DELETE') { await q('DELETE FROM contacts WHERE id=?', id).run(); return json({ ok: 1 }); }
   }
@@ -161,12 +204,11 @@ async function route(req, env, url, email) {
     if (s.get('online')) w.push('visible_on_website=1');
     if (s.get('type')) { w.push('property_type=?'); a.push(s.get('type')); }
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
-    const total = await one(`SELECT COUNT(*) n FROM properties ${where}`, ...a);
-    const rows = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
+    const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
       (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
       (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners
-      FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per, (page - 1) * per);
-    return json({ total: total.n, page, per, rows });
+      FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
+    return json({ total: null, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
   }
   if (p === '/properties' && m === 'POST') {
     const b = await body(), d = pick(b, PROP_FIELDS); d.created_at = now(); d.status ||= 'pending';
@@ -201,13 +243,13 @@ async function route(req, env, url, email) {
       if (b.texts) b.texts.forEach(t => st.push(q('INSERT INTO property_texts(property_id,lang,title,short_description,full_description) VALUES(?,?,?,?,?) ON CONFLICT(property_id,lang) DO UPDATE SET title=excluded.title,short_description=excluded.short_description,full_description=excluded.full_description', id, t.lang, t.title || null, t.short_description || null, t.full_description || null)));
       if (b.owners) { st.push(q('DELETE FROM property_owners WHERE property_id=?', id)); b.owners.forEach(o => st.push(q('INSERT OR IGNORE INTO property_owners VALUES(?,?,?)', id, o, null))); st.push(q('UPDATE contacts SET is_seller=1 WHERE id IN (' + (b.owners.length ? b.owners.map(() => '?').join(',') : 'NULL') + ')', ...b.owners)); }
       if (b.photos) b.photos.forEach((ph, i) => st.push(q('UPDATE photos SET position=?,visible=? WHERE id=? AND property_id=?', i + 1, ph.visible ? 1 : 0, ph.id, id)));
-      if (st.length) await db.batch(st); return json({ ok: 1 });
+      if (st.length) await batch(st); return json({ ok: 1 });
     }
   }
 
   // ---------- photo migration: copy from Proppy's CDN into R2 ----------
   if (p === '/admin/photos/status') {
-    const r = await one("SELECT COUNT(*) total, SUM(r2_key IS NOT NULL AND r2_key!='missing') done, SUM(r2_key='missing') missing FROM photos");
+    const r = await stat('photo_status', 120, () => one("SELECT COUNT(*) total, SUM(r2_key IS NOT NULL AND r2_key!='missing') done, SUM(r2_key='missing') missing FROM photos"));
     const miss = r.missing ? await all("SELECT p.id,p.property_id,pr.reference,p.position,p.visible FROM photos p JOIN properties pr ON pr.id=p.property_id WHERE p.r2_key='missing' ORDER BY p.property_id,p.position LIMIT 50") : [];
     return json({ total: r.total, done: r.done || 0, missing: r.missing || 0, missingList: miss, r2: !!env.PHOTOS });
   }
@@ -230,13 +272,17 @@ async function route(req, env, url, email) {
       } catch (e) { fails.push({ id: ph.id, error: String(e.message || e) }); return null; }
     }));
     const st = results.filter(Boolean);
-    if (st.length) await db.batch(st);
+    if (st.length) await batch(st);
     // only count what is left when this batch came back short (avoids re-scanning the table every call: D1 free tier = 5M row reads/day)
     return json({ copied: st.length - gone.length, missing: gone.length, failed: fails, remaining: rows.length < limit && !gone.length ? 0 : 1, bytes });
   }
 
   // ---------- features (custom ones allowed) ----------
-  if (p === '/features' && m === 'GET') return json(await all('SELECT f.*,(SELECT COUNT(*) FROM property_features WHERE feature_id=f.id) used FROM feature_defs f ORDER BY grp,sort,label_pt'));
+  if (p === '/features' && m === 'GET') {
+    const f = await all('SELECT * FROM feature_defs ORDER BY grp,sort,label_pt');
+    if (url.searchParams.get('usage')) { const u = Object.fromEntries((await all('SELECT feature_id,COUNT(*) n FROM property_features GROUP BY feature_id')).map(x => [x.feature_id, x.n])); f.forEach(x => (x.used = u[x.id] || 0)); }
+    return json(f);
+  }
   if (p === '/features' && m === 'POST') {
     const b = await body();
     const id = (await one('SELECT MAX(MAX(id),100000)+1 n FROM feature_defs')).n;
@@ -245,11 +291,12 @@ async function route(req, env, url, email) {
   }
   if ((r = p.match(/^\/features\/(\d+)$/))) {
     if (m === 'PUT') { const b = await body(); await q('UPDATE feature_defs SET label_pt=COALESCE(?,label_pt),label_en=COALESCE(?,label_en),grp=COALESCE(?,grp),active=COALESCE(?,active) WHERE id=?', b.label_pt ?? null, b.label_en ?? null, b.grp ?? null, b.active ?? null, +r[1]).run(); return json({ ok: 1 }); }
-    if (m === 'DELETE') { await db.batch([q('DELETE FROM property_features WHERE feature_id=?', +r[1]), q('DELETE FROM feature_defs WHERE id=?', +r[1])]); return json({ ok: 1 }); }
+    if (m === 'DELETE') { await batch([q('DELETE FROM property_features WHERE feature_id=?', +r[1]), q('DELETE FROM feature_defs WHERE id=?', +r[1])]); return json({ ok: 1 }); }
   }
-  if (p === '/users' && m === 'POST') { const b = await body(); await q('INSERT INTO users(name,email,role) VALUES(?,?,?)', b.name, b.email || null, b.role || 'agent').run(); return json({ ok: 1 }); }
+  if (p === '/users' && m === 'POST') { const b = await body(); await q('INSERT INTO users(name,email,role) VALUES(?,?,?)', b.name, b.email || null, b.role || 'agent').run(); await q("DELETE FROM stats WHERE key='lookups'").run(); return json({ ok: 1 }); }
 
   return json({ error: 'not found' }, 404);
+  }
 }
 
 // ---------- public API for the website (bypass Cloudflare Access for /api/public/*, protected by SITE_KEY) ----------
@@ -269,12 +316,15 @@ async function publicApi(req, env, url) {
   const key = req.headers.get('x-site-key');
   if (!env.SITE_KEY || key !== env.SITE_KEY) return json({ error: 'unauthorised' }, 401);
   const db = env.DB, p = url.pathname.replace('/api/public', '');
-  const all = async (s, ...a) => (await db.prepare(s).bind(...a).all()).results;
+  let reads = 0;
+  const all = async (s, ...a) => { const r = await db.prepare(s).bind(...a).all(); reads += r.meta?.rows_read || 0; return r.results; };
 
   if (p === '/listings' && req.method === 'GET') {
+    const memoKey = 'listings:' + url.origin;
+    if (memo[memoKey] && Date.now() - memo[memoKey].t < 300000) return json(memo[memoKey].v);
     const props = await all("SELECT * FROM properties WHERE status='active' AND sold=0 AND visible_on_website=1");
     const ids = props.map(x => x.id);
-    if (!ids.length) return json([]);
+    if (!ids.length) { await addReads(db, reads); return json([]); }
     const ph = ids.map(() => '?').join(',');
     const [texts, photos, feats, users] = await Promise.all([
       all(`SELECT * FROM property_texts WHERE lang='en' AND property_id IN (${ph})`, ...ids),
@@ -309,6 +359,8 @@ async function publicApi(req, env, url) {
         publishedAt: published, updatedAt: null,
       };
     });
+    memo[memoKey] = { t: Date.now(), v: out };
+    await addReads(db, reads);
     return json(out);
   }
 
@@ -335,6 +387,7 @@ async function publicApi(req, env, url) {
       db.prepare("INSERT INTO notes(contact_id,property_id,body,source,created_at) VALUES(?,?,?,'website',?)").bind(id, pid, `${title}\n${msg}`.trim(), nowIso),
       db.prepare('INSERT INTO events(contact_id,property_id,kind,title,due_at) VALUES(?,?,?,?,?)').bind(id, pid, 'lead', `Reply: ${title}`, nowIso.slice(0, 10)),
     ]);
+    await addReads(db, reads);
     return json({ ok: 1, contact: id });
   }
   return json({ error: 'not found' }, 404);
