@@ -409,6 +409,14 @@ async function publicApi(req, env, url) {
     return json(out);
   }
 
+  if (p === '/inbound' && req.method === 'POST') {          // portal enquiry emails posted by the Gmail script
+    const b = await req.json();
+    const lead = parseLead({ from: b.from, replyTo: b.replyTo, subject: b.subject, text: b.text });
+    if (!lead) return json({ ok: 1, skipped: 'not a recognised portal email' });
+    const r = await recordLead(db, { ...lead, title: lead.reference ? `Enquiry ${lead.reference}` : lead.subject, source: 'portal-email' });
+    reads += r.reads; await addReads(db, reads);
+    return json({ ok: 1, contact: r.id, created: r.created, origin: lead.origin });
+  }
   if (p === '/leads' && req.method === 'POST') {
     const b = await req.json();
     if (!b.email) return json({ error: 'email required' }, 400);
