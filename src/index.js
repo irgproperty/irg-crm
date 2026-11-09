@@ -207,19 +207,21 @@ async function route(req, env, url, email) {
 
   // ---------- photo migration: copy from Proppy's CDN into R2 ----------
   if (p === '/admin/photos/status') {
-    const r = await one('SELECT COUNT(*) total, SUM(r2_key IS NOT NULL) done FROM photos');
-    return json({ total: r.total, done: r.done || 0, r2: !!env.PHOTOS });
+    const r = await one("SELECT COUNT(*) total, SUM(r2_key IS NOT NULL AND r2_key!='missing') done, SUM(r2_key='missing') missing FROM photos");
+    const miss = r.missing ? await all("SELECT p.id,p.property_id,pr.reference,p.position,p.visible FROM photos p JOIN properties pr ON pr.id=p.property_id WHERE p.r2_key='missing' ORDER BY p.property_id,p.position LIMIT 50") : [];
+    return json({ total: r.total, done: r.done || 0, missing: r.missing || 0, missingList: miss, r2: !!env.PHOTOS });
   }
   if (p === '/admin/photos/migrate' && m === 'POST') {
     if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
     const b = await body(), limit = Math.min(+b.limit || 8, 15), width = +b.width || 2000;
     const rows = await all('SELECT id,property_id,source_url FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL ORDER BY property_id,position LIMIT ?', limit);
-    const fails = []; let bytes = 0;
+    const fails = [], gone = []; let bytes = 0;
     const results = await Promise.all(rows.map(async (ph) => {
       try {
         const clean = ph.source_url.split('?')[0];
         let res = await fetch(`${clean}?width=${width}`);
         if (!res.ok) res = await fetch(clean);
+        if (res.status === 404) { gone.push(ph.id); return q("UPDATE photos SET r2_key='missing' WHERE id=?", ph.id); }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const key = `p/${ph.property_id}/${ph.id}.jpg`;
         const obj = await env.PHOTOS.put(key, res.body, { httpMetadata: { contentType: res.headers.get('content-type') || 'image/jpeg' } });
@@ -230,8 +232,7 @@ async function route(req, env, url, email) {
     const st = results.filter(Boolean);
     if (st.length) await db.batch(st);
     // only count what is left when this batch came back short (avoids re-scanning the table every call: D1 free tier = 5M row reads/day)
-    const remaining = rows.length < limit ? 0 : 1;
-    return json({ copied: st.length, failed: fails, remaining, bytes });
+    return json({ copied: st.length - gone.length, missing: gone.length, failed: fails, remaining: rows.length < limit && !gone.length ? 0 : 1, bytes });
   }
 
   // ---------- features (custom ones allowed) ----------
@@ -277,7 +278,7 @@ async function publicApi(req, env, url) {
     const ph = ids.map(() => '?').join(',');
     const [texts, photos, feats, users] = await Promise.all([
       all(`SELECT * FROM property_texts WHERE lang='en' AND property_id IN (${ph})`, ...ids),
-      all(`SELECT property_id,source_url,r2_key FROM photos WHERE visible=1 AND property_id IN (${ph}) ORDER BY property_id,position`, ...ids),
+      all(`SELECT property_id,source_url,r2_key FROM photos WHERE visible=1 AND (r2_key IS NULL OR r2_key!='missing') AND property_id IN (${ph}) ORDER BY property_id,position`, ...ids),
       all(`SELECT pf.property_id,pf.value,f.id,f.kind,f.grp,f.label_en,f.label_pt FROM property_features pf JOIN feature_defs f ON f.id=pf.feature_id WHERE f.active=1 AND pf.property_id IN (${ph})`, ...ids),
       all('SELECT id,name,email FROM users'),
     ]);
