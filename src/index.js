@@ -1,3 +1,4 @@
+import { feedApi } from './feeds.js';
 // IRG CRM API. Auth: put the whole site behind Cloudflare Access; the worker trusts its header.
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { 'content-type': 'application/json' } });
 const PROP_FIELDS = ['reference','status','status_reason','sold','visible_on_website','block_export','exclusive','pre_off_market','business_type','property_type','typology','condition','price','price_to','price_visible','bedrooms','bathrooms','area_house','area_land','area_gross','country','district','city','locality','zone','zipcode','address','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee','energy_rating','energy_cert_number','habitation_licence','registry_number','contract_number','contract_start','contract_end','commission','internal_name','key_notes','internal_notes','broker_user_id'];
@@ -29,6 +30,9 @@ export default {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/api/public/')) {
       try { return await publicApi(req, env, url); } catch (e) { return json({ error: String(e.message || e) }, 500); }
+    }
+    if (url.pathname.startsWith('/api/feed/')) {
+      try { return await feedApi(req, env, url, addReads); } catch (e) { return json({ error: String(e.message || e) }, 500); }
     }
     const email = await accessEmail(req, env, url);
     if (!email) return json({ error: 'unauthorised' }, 401);

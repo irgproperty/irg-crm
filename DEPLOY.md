@@ -14,3 +14,9 @@ Run these on any computer with Node 20+ (`git clone https://github.com/irgproper
    Then `npx wrangler secret put ACCESS_TEAM_DOMAIN` (e.g. yourteam.cloudflareaccess.com) and
    `npx wrangler secret put ACCESS_AUD` (the Application Audience tag of the first application).
 Until step 8 is done the CRM refuses all requests except /api/public/* (it fails closed).
+
+## Portal feeds (pull)
+- Kyero v3: `https://irg-crm.irgproperty-crm.workers.dev/api/feed/kyero.xml?key=<FEED_KEY>`
+- Needs secret `FEED_KEY` (`npx wrangler secret put FEED_KEY`) and the Cloudflare Access bypass policy to include path `/api/feed/*` (same as `/api/public/*`).
+- Includes only: active, not sold, visible on website, not "block export", sale. (Local data: 36 of the 59 website listings; the other 23 have block_export=1.)
+- Rebuilt at most every 30 min (memory cache), ~4.5k D1 reads per rebuild.
