@@ -68,9 +68,9 @@ export function kyeroXml(props, now = new Date()) {
   return out.filter(Boolean).join('\n');
 }
 
-// GET /api/feed/kyero.xml?key=FEED_KEY
+// GET /api/public/feed/kyero.xml?key=FEED_KEY   (under /api/public so the existing Access bypass covers it)
 export async function feedApi(req, env, url, addReads) {
-  const name = url.pathname.replace('/api/feed/', '');
+  const name = url.pathname.replace(/^\/api\/(public\/)?feed\//, '');
   if (!env.FEED_KEY || url.searchParams.get('key') !== env.FEED_KEY) return new Response('unauthorised', { status: 401 });
   const builders = { 'kyero.xml': kyeroXml };
   if (!builders[name]) return new Response('not found', { status: 404 });

@@ -41,7 +41,7 @@ export default {
     if (url.pathname.startsWith('/api/public/')) {
       try { return await publicApi(req, env, url); } catch (e) { return json({ error: String(e.message || e) }, 500); }
     }
-    if (url.pathname.startsWith('/api/feed/')) {
+    if (url.pathname.startsWith('/api/feed/') || url.pathname.startsWith('/api/public/feed/')) {
       try { return await feedApi(req, env, url, addReads); } catch (e) { return json({ error: String(e.message || e) }, 500); }
     }
     const email = await accessEmail(req, env, url);
