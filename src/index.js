@@ -321,7 +321,11 @@ async function route(req, env, url, email, ctx) {
   if (p === '/admin/photos/migrate' && m === 'POST') {
     if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
     const b = await body(), limit = Math.min(+b.limit || 8, 15), width = +b.width || 2000;
-    const rows = await all('SELECT id,property_id,source_url FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL ORDER BY property_id,position LIMIT ?', limit);
+    // live (active, unsold, on-website) properties first, so the watermark reaches the public photos before the archive
+    if (!memo.liveIds || Date.now() - memo.liveIds.t > 600000) memo.liveIds = { t: Date.now(), v: (await all("SELECT id FROM properties WHERE status='active' AND sold=0 AND visible_on_website=1")).map(x => x.id) };
+    const live = memo.liveIds.v;
+    let rows = live.length ? await all(`SELECT id,property_id,source_url FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL AND visible=1 AND property_id IN (${live.map(() => '?').join(',')}) ORDER BY property_id,position LIMIT ?`, ...live, limit) : [];
+    if (!rows.length) rows = await all('SELECT id,property_id,source_url FROM photos WHERE r2_key IS NULL AND source_url IS NOT NULL ORDER BY property_id,position LIMIT ?', limit);
     const fails = [], gone = []; let bytes = 0;
     const results = await Promise.all(rows.map(async (ph) => {
       try {
