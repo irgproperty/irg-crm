@@ -316,7 +316,8 @@ async function route(req, env, url, email, ctx) {
   if (p === '/admin/photos/status') {
     const r = await stat('photo_status', 120, () => one("SELECT COUNT(*) total, SUM(r2_key IS NOT NULL AND r2_key!='missing') done, SUM(r2_key='missing') missing FROM photos"));
     const miss = r.missing ? await all("SELECT p.id,p.property_id,pr.reference,p.position,p.visible FROM photos p JOIN properties pr ON pr.id=p.property_id WHERE p.r2_key='missing' ORDER BY p.property_id,p.position LIMIT 50") : [];
-    return json({ total: r.total, done: r.done || 0, missing: r.missing || 0, missingList: miss, r2: !!env.PHOTOS });
+    const lv = await stat('photo_live', 60, () => one("SELECT COUNT(*) total, SUM(r2_key IS NOT NULL AND r2_key!='missing') done, SUM(r2_key='missing') missing FROM photos WHERE visible=1 AND property_id IN (SELECT id FROM properties WHERE status='active' AND sold=0 AND visible_on_website=1)"));
+    return json({ total: r.total, done: r.done || 0, missing: r.missing || 0, missingList: miss, r2: !!env.PHOTOS, live: lv });
   }
   if (p === '/admin/photos/migrate' && m === 'POST') {
     if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
