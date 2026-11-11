@@ -444,7 +444,7 @@ async function publicApi(req, env, url) {
       const title = t.title || `${r.bedrooms ? r.bedrooms + '-bedroom ' : ''}${type.toLowerCase()} in ${area}`;
       const published = r.published_at || r.created_at;
       return {
-        id: r.id, reference: r.reference || String(r.id), title, status: 'active', badge: null, type, typology: r.typology || '',
+        id: r.id, reference: r.reference || String(r.id), title, status: 'active', badge: (LB[r.id] || [])[0]?.name || null, type, typology: r.typology || '',
         price: r.price_visible ? r.price : null, bedrooms: r.bedrooms, bathrooms: r.bathrooms,
         livingArea: r.area_house || null, plotArea: r.area_land || null, totalArea: r.area_gross || null,
         constructionYear: r.year_built, condition: COND_EN[r.condition] || r.condition || '', energyRating: r.energy_rating || '',
