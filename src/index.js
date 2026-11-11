@@ -249,7 +249,7 @@ async function route(req, env, url, email, ctx) {
     const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
       (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
       (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners,
-      (SELECT GROUP_CONCAT(l.name||':'||l.public, '|') FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE pl.property_id=p.id) labels
+      (SELECT GROUP_CONCAT(l.name||'~'||l.public||'~'||COALESCE(l.color,''), '|') FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE pl.property_id=p.id) labels
       FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
     return json({ total: null, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
   }
@@ -275,9 +275,9 @@ async function route(req, env, url, email, ctx) {
     return json({ ok: ids.length });
   }
   if (p === '/labels' && m === 'GET') return json(await all('SELECT l.*,(SELECT COUNT(*) FROM property_labels WHERE label_id=l.id) used FROM label_defs l ORDER BY public DESC,sort,name'));
-  if (p === '/labels' && m === 'POST') { const b = await body(); if (!b.name?.trim()) return json({ error: 'name required' }, 400); await q('INSERT OR IGNORE INTO label_defs(name,public,sort) VALUES(?,?,50)', b.name.trim(), b.public ? 1 : 0).run(); return json(await one('SELECT * FROM label_defs WHERE name=?', b.name.trim())); }
+  if (p === '/labels' && m === 'POST') { const b = await body(); if (!b.name?.trim()) return json({ error: 'name required' }, 400); await q('INSERT OR IGNORE INTO label_defs(name,public,sort,color) VALUES(?,?,50,?)', b.name.trim(), b.public ? 1 : 0, /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#C9A96E').run(); return json(await one('SELECT * FROM label_defs WHERE name=?', b.name.trim())); }
   if ((r = p.match(/^\/labels\/(\d+)$/))) {
-    if (m === 'PUT') { const b = await body(); await q('UPDATE label_defs SET name=COALESCE(?,name),public=COALESCE(?,public) WHERE id=?', b.name || null, b.public ?? null, +r[1]).run(); return json({ ok: 1 }); }
+    if (m === 'PUT') { const b = await body(); await q('UPDATE label_defs SET name=COALESCE(?,name),public=COALESCE(?,public),color=COALESCE(?,color) WHERE id=?', b.name || null, b.public ?? null, /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : null, +r[1]).run(); return json({ ok: 1 }); }
     if (m === 'DELETE') { await q('DELETE FROM label_defs WHERE id=?', +r[1]).run(); return json({ ok: 1 }); }
   }
   if ((r = p.match(/^\/properties\/(\d+)$/))) {
@@ -401,13 +401,25 @@ async function recordLead(db, b) {
   return { id, created, reads };
 }
 
+const textOn = (hex) => { const m = /^#([0-9a-f]{6})$/i.exec(hex || ''); if (!m) return '#ffffff'; const n = parseInt(m[1], 16), l = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)); return l > 175 ? '#2A2A2A' : '#ffffff'; };
 async function publicApi(req, env, url) {
   if (url.pathname.startsWith('/api/public/img/') && req.method === 'GET') {
     const k = decodeURIComponent(url.pathname.slice('/api/public/img/'.length));
     if (!env.PHOTOS || !/^[\w\/.\-]+$/.test(k)) return new Response('not found', { status: 404 });
     const o = await env.PHOTOS.get(k);
     if (!o) return new Response('not found', { status: 404 });
-    return new Response(o.body, { headers: { 'content-type': o.httpMetadata?.contentType || 'image/jpeg', 'cache-control': 'public, max-age=31536000, immutable', etag: o.httpEtag } });
+    const hdr = { 'cache-control': 'public, max-age=31536000, immutable' };
+    if (env.IMAGES && url.searchParams.get('raw') !== env.SITE_KEY) {      // stamp the IRG logo in the middle of every photo
+      const ck = new Request(url.origin + '/__wm/' + k), cache = caches.default;
+      const hit = await cache.match(ck); if (hit) return hit;
+      try {
+        const logo = await env.ASSETS.fetch(new Request(url.origin + '/wm.png'));
+        const out = await env.IMAGES.input(o.body).transform({ width: 1600 }).draw(logo.body, { opacity: 0.3 }).output({ format: 'image/jpeg', quality: 85 });
+        const res = new Response(out.image(), { headers: { 'content-type': 'image/jpeg', ...hdr } });
+        await cache.put(ck, res.clone()); return res;
+      } catch (e) { console.log('watermark failed', k, String(e)); const o2 = await env.PHOTOS.get(k); return new Response(o2.body, { headers: { 'content-type': o2.httpMetadata?.contentType || 'image/jpeg', 'cache-control': 'public, max-age=300' } }); }
+    }
+    return new Response(o.body, { headers: { 'content-type': o.httpMetadata?.contentType || 'image/jpeg', etag: o.httpEtag, ...hdr } });
   }
   const key = req.headers.get('x-site-key');
   if (!env.SITE_KEY || key !== env.SITE_KEY) return json({ error: 'unauthorised' }, 401);
@@ -427,7 +439,7 @@ async function publicApi(req, env, url) {
       all(`SELECT property_id,source_url,r2_key FROM photos WHERE visible=1 AND (r2_key IS NULL OR r2_key!='missing') AND property_id IN (${ph}) ORDER BY property_id,position`, ...ids),
       all(`SELECT pf.property_id,pf.value,f.id,f.kind,f.grp,f.label_en,f.label_pt FROM property_features pf JOIN feature_defs f ON f.id=pf.feature_id WHERE f.active=1 AND pf.property_id IN (${ph})`, ...ids),
       all('SELECT id,name,email FROM users'),
-      all(`SELECT pl.property_id,l.name FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE l.public=1 AND pl.property_id IN (${ph}) ORDER BY l.sort`, ...ids),
+      all(`SELECT pl.property_id,l.name,l.color FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE l.public=1 AND pl.property_id IN (${ph}) ORDER BY l.sort`, ...ids),
     ]);
     const by = (rows) => rows.reduce((m, r) => ((m[r.property_id] ||= []).push(r), m), {});
     const T = Object.fromEntries(texts.map(t => [t.property_id, t])), PH = by(photos), FE = by(feats), LB = by(lbls), U = Object.fromEntries(users.map(u => [u.id, u]));
@@ -444,7 +456,7 @@ async function publicApi(req, env, url) {
       const title = t.title || `${r.bedrooms ? r.bedrooms + '-bedroom ' : ''}${type.toLowerCase()} in ${area}`;
       const published = r.published_at || r.created_at;
       return {
-        id: r.id, reference: r.reference || String(r.id), title, status: 'active', badge: (LB[r.id] || [])[0]?.name || null, type, typology: r.typology || '',
+        id: r.id, reference: r.reference || String(r.id), title, status: 'active', badge: (LB[r.id] || [])[0]?.name || null, badgeColor: (LB[r.id] || [])[0]?.color || null, badgeText: textOn((LB[r.id] || [])[0]?.color), type, typology: r.typology || '',
         price: r.price_visible ? r.price : null, bedrooms: r.bedrooms, bathrooms: r.bathrooms,
         livingArea: r.area_house || null, plotArea: r.area_land || null, totalArea: r.area_gross || null,
         constructionYear: r.year_built, condition: COND_EN[r.condition] || r.condition || '', energyRating: r.energy_rating || '',

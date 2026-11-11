@@ -1,0 +1,2 @@
+ALTER TABLE label_defs ADD COLUMN color TEXT DEFAULT '#C9A96E';
+UPDATE label_defs SET color='#C9A96E' WHERE color IS NULL;
