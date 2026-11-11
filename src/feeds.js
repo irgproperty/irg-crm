@@ -10,10 +10,10 @@ const LANGS = ['en', 'pt', 'fr', 'de', 'es', 'nl', 'it', 'ru', 'sv', 'no', 'da',
 const memo = {};
 
 // Everything the feeds need, in 5 queries (no per-property queries).
-async function load(env, origin, siteUrl) {
+async function load(env, origin, siteUrl, portal) {
   const db = env.DB; let reads = 0;
   const all = async (s, ...a) => { const r = await db.prepare(s).bind(...a).all(); reads += r.meta?.rows_read || 0; return r.results; };
-  const props = await all("SELECT * FROM properties WHERE status='active' AND sold=0 AND visible_on_website=1 AND block_export=0 AND business_type='Venda' ORDER BY id");
+  const props = await all("SELECT p.* FROM properties p JOIN property_portals pp ON pp.property_id=p.id AND pp.portal_slug=? WHERE p.status='active' AND p.sold=0 AND p.block_export=0 AND p.business_type='Venda' ORDER BY p.id", portal);
   const ids = props.map((x) => x.id);
   if (!ids.length) return { props: [], reads };
   const ph = ids.map(() => '?').join(',');
@@ -72,14 +72,17 @@ export function kyeroXml(props, now = new Date()) {
 export async function feedApi(req, env, url, addReads) {
   const name = url.pathname.replace(/^\/api\/(public\/)?feed\//, '');
   if (!env.FEED_KEY || url.searchParams.get('key') !== env.FEED_KEY) return new Response('unauthorised', { status: 401 });
-  const builders = { 'kyero.xml': kyeroXml };
-  if (!builders[name]) return new Response('not found', { status: 404 });
-  const mk = name + url.origin;
+  const slug = name.replace(/\.xml$/, '');
+  if (!/^[a-z0-9-]+$/.test(slug)) return new Response('not found', { status: 404 });
+  const mk = slug + url.origin;
   if (!memo[mk] || Date.now() - memo[mk].t > 1800e3) {       // rebuilt at most every 30 min however often portals poll
+    const portal = await env.DB.prepare('SELECT * FROM portals WHERE slug=?').bind(slug).first();
+    if (!portal) return new Response('no such portal', { status: 404 });
+    if (portal.format !== 'kyero') return new Response('no feed format set up for ' + portal.name + ' yet', { status: 404 });
     const siteUrl = env.SITE_URL || 'https://www.irgproperty.com';
-    const { props, reads } = await load(env, url.origin, siteUrl);
+    const { props, reads } = await load(env, url.origin, siteUrl, slug);
     await addReads(env.DB, reads);
-    memo[mk] = { t: Date.now(), xml: builders[name](props) };
+    memo[mk] = { t: Date.now(), xml: kyeroXml(props) };
   }
   return new Response(memo[mk].xml, { headers: { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=1800' } });
 }

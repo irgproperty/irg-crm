@@ -248,12 +248,14 @@ async function route(req, env, url, email, ctx) {
     else if (st === 'sold') w.push('sold=1'); else if (st) { w.push('status=?', 'sold=0'); a.push(st); }
     if (s.get('online')) w.push('visible_on_website=1');
     if (s.get('featured')) w.push('featured=1');
+    if (s.get('portal')) { w.push('id IN (SELECT property_id FROM property_portals WHERE portal_slug=?)'); a.push(s.get('portal')); }
     if (s.get('type')) { w.push('property_type=?'); a.push(s.get('type')); }
     if (s.get('label')) { w.push('id IN (SELECT property_id FROM property_labels WHERE label_id=?)'); a.push(+s.get('label')); }
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
     const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.featured,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
       (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
       (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners,
+      (SELECT GROUP_CONCAT(portal_slug, ',') FROM property_portals WHERE property_id=p.id) portals,
       (SELECT GROUP_CONCAT(l.name||'~'||l.public||'~'||COALESCE(l.color,''), '|') FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE pl.property_id=p.id) labels
       FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
     return json({ total: null, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
@@ -271,6 +273,11 @@ async function route(req, env, url, email, ctx) {
     if (!ids.length) return json({ error: 'nothing selected' }, 400);
     const ph = ids.map(() => '?').join(',');
     if (b.action === 'delete') { for (const id of ids) await deleteProperty(id); }
+    else if (b.action === 'portal_add' || b.action === 'portal_remove') {
+      const sl = String(b.portal || ''); if (!sl) return json({ error: 'choose a portal' }, 400);
+      if (b.action === 'portal_add') await batch(ids.map(id => q('INSERT OR IGNORE INTO property_portals VALUES(?,?)', id, sl)));
+      else await q(`DELETE FROM property_portals WHERE portal_slug=? AND property_id IN (${ph})`, sl, ...ids).run();
+    }
     else {
       const set = { inactive: "status='inactive'", active: "status='active',sold=0", sold: "sold=1,visible_on_website=0", hide: 'visible_on_website=0', show: 'visible_on_website=1', noexport: 'block_export=1', export: 'block_export=0', feature: 'featured=1', unfeature: 'featured=0' }[b.action];
       if (!set) return json({ error: 'unknown action' }, 400);
@@ -324,6 +331,12 @@ async function route(req, env, url, email, ctx) {
     const cur = await getWm(env); await q("UPDATE app_settings SET value=? WHERE key='watermark'", JSON.stringify({ ...cur, v: Date.now() })).run(); clearWm();
     return json({ ok: 1 });
   }
+  if (p === '/portals' && m === 'GET') return json(await all('SELECT p.*,(SELECT COUNT(*) FROM property_portals WHERE portal_slug=p.slug) used FROM portals p ORDER BY sort,name'));
+  if (p === '/portals' && m === 'POST') { const b = await body(), name = (b.name || '').trim(); if (!name) return json({ error: 'name required' }, 400); const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); await q('INSERT OR IGNORE INTO portals(slug,name,format,sort) VALUES(?,?,?,60)', slug, name, b.format === 'kyero' ? 'kyero' : 'none').run(); return json({ slug }); }
+  if ((r = p.match(/^\/portals\/([a-z0-9-]+)$/))) {
+    if (m === 'PUT') { const b = await body(); await q('UPDATE portals SET name=COALESCE(?,name),format=COALESCE(?,format) WHERE slug=?', b.name || null, b.format === 'kyero' ? 'kyero' : b.format === 'none' ? 'none' : null, r[1]).run(); return json({ ok: 1 }); }
+    if (m === 'DELETE') { await batch([q('DELETE FROM property_portals WHERE portal_slug=?', r[1]), q('DELETE FROM portals WHERE slug=?', r[1])]); return json({ ok: 1 }); }
+  }
   if (p === '/labels' && m === 'GET') return json(await all('SELECT l.*,(SELECT COUNT(*) FROM property_labels WHERE label_id=l.id) used FROM label_defs l ORDER BY public DESC,sort,name'));
   if (p === '/labels' && m === 'POST') { const b = await body(); if (!b.name?.trim()) return json({ error: 'name required' }, 400); await q('INSERT OR IGNORE INTO label_defs(name,public,sort,color) VALUES(?,?,50,?)', b.name.trim(), b.public ? 1 : 0, /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#C9A96E').run(); return json(await one('SELECT * FROM label_defs WHERE name=?', b.name.trim())); }
   if ((r = p.match(/^\/labels\/(\d+)$/))) {
@@ -337,15 +350,16 @@ async function route(req, env, url, email, ctx) {
       const pr = await one('SELECT * FROM properties WHERE id=?', id);
       if (!pr) return json({ error: 'not found' }, 404);
       delete pr.raw_json;
-      const [texts, features, photos, owners, notes, labels] = await Promise.all([
+      const [texts, features, photos, owners, notes, labels, portals] = await Promise.all([
         all('SELECT * FROM property_texts WHERE property_id=?', id),
         all('SELECT feature_id,value FROM property_features WHERE property_id=?', id),
         all('SELECT id,position,visible,source_url,r2_key FROM photos WHERE property_id=? ORDER BY position', id),
         all('SELECT o.contact_id id,c.name FROM property_owners o LEFT JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=?', id),
         all('SELECT n.*,u.name user FROM notes n LEFT JOIN users u ON u.id=n.user_id WHERE property_id=? ORDER BY created_at DESC', id),
         all('SELECT label_id FROM property_labels WHERE property_id=?', id),
+        all('SELECT portal_slug FROM property_portals WHERE property_id=?', id),
       ]);
-      return json({ ...pr, texts, features, photos, owners, notes, labels: labels.map(x => x.label_id) });
+      return json({ ...pr, texts, features, photos, owners, notes, labels: labels.map(x => x.label_id), portals: portals.map(x => x.portal_slug) });
     }
     if (m === 'PUT') {
       const b = await body(), st = [];
@@ -355,6 +369,7 @@ async function route(req, env, url, email, ctx) {
         b.features.forEach(f => st.push(q('INSERT OR IGNORE INTO property_features VALUES(?,?,?)', id, f.feature_id, f.value ?? null)));
       }
       if (b.labels) { st.push(q('DELETE FROM property_labels WHERE property_id=?', id)); b.labels.forEach(l => st.push(q('INSERT OR IGNORE INTO property_labels VALUES(?,?)', id, +l))); }
+      if (b.portals) { st.push(q('DELETE FROM property_portals WHERE property_id=?', id)); b.portals.forEach(x => st.push(q('INSERT OR IGNORE INTO property_portals VALUES(?,?)', id, String(x)))); }
       if (b.texts) b.texts.forEach(t => st.push(q('INSERT INTO property_texts(property_id,lang,title,short_description,full_description) VALUES(?,?,?,?,?) ON CONFLICT(property_id,lang) DO UPDATE SET title=excluded.title,short_description=excluded.short_description,full_description=excluded.full_description', id, t.lang, t.title || null, t.short_description || null, t.full_description || null)));
       if (b.owners) { st.push(q('DELETE FROM property_owners WHERE property_id=?', id)); b.owners.forEach(o => st.push(q('INSERT OR IGNORE INTO property_owners VALUES(?,?,?)', id, o, null))); st.push(q('UPDATE contacts SET is_seller=1 WHERE id IN (' + (b.owners.length ? b.owners.map(() => '?').join(',') : 'NULL') + ')', ...b.owners)); }
       if (b.photos) b.photos.forEach((ph, i) => st.push(q('UPDATE photos SET position=?,visible=? WHERE id=? AND property_id=?', i + 1, ph.visible ? 1 : 0, ph.id, id)));
