@@ -134,7 +134,7 @@ async function route(req, env, url, email, ctx) {
     }
     if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
     if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
-    if (s.get('seller') && s.get('buyer')) w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (s.get('seller')) w.push('c.is_seller=1'); else if (s.get('buyer')) w.push('c.is_buyer=1');
+    { const k = s.get('kind'); if (k === 'both') w.push('c.is_seller=1 AND c.is_buyer=1'); else if (k === 'either') w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (k === 'seller') w.push('c.is_seller=1'); else if (k === 'buyer') w.push('c.is_buyer=1'); }
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
     const rows0 = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
@@ -154,7 +154,7 @@ async function route(req, env, url, email, ctx) {
     const s = url.searchParams, w = ['EXISTS (SELECT 1 FROM contact_emails e WHERE e.contact_id=c.id)'], a = [];
     if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
     if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
-    if (s.get('seller') && s.get('buyer')) w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (s.get('seller')) w.push('c.is_seller=1'); else if (s.get('buyer')) w.push('c.is_buyer=1');
+    { const k = s.get('kind'); if (k === 'both') w.push('c.is_seller=1 AND c.is_buyer=1'); else if (k === 'either') w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (k === 'seller') w.push('c.is_seller=1'); else if (k === 'buyer') w.push('c.is_buyer=1'); }
     if (s.get('q')) { w.push('c.name LIKE ?'); a.push('%' + s.get('q') + '%'); }
     const rows = await all(`SELECT c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
