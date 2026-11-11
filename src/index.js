@@ -284,7 +284,7 @@ async function route(req, env, url, email, ctx) {
     if (!src) return json({ error: 'file not available' }, 404);
     const want = url.searchParams.get('wm') === '1';
     let body = src, type = 'image/jpeg';
-    if (want) { const out = await stamp(env, url.origin, src, 2400, { ...(await getWm(env)), on: 1 }); if (!out) return json({ error: 'watermark not available' }, 500); body = out; }
+    if (want) { const out = await stamp(env, url.origin, src, 1600, { ...(await getWm(env)), on: 1 }); if (!out) return json({ error: 'watermark not available' }, 500); body = out; }
     const h = { 'content-type': type, 'cache-control': 'private, max-age=600' };
     if (url.searchParams.get('dl')) h['content-disposition'] = `attachment; filename="IRG-${ph.reference}-${ph.position}${want ? '' : '-original'}.jpg"`;
     return new Response(body, { headers: h });
@@ -382,7 +382,9 @@ async function route(req, env, url, email, ctx) {
         if (res.status === 404) { gone.push(ph.id); return q("UPDATE photos SET r2_key='missing' WHERE id=?", ph.id); }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const key = `p/${ph.property_id}/${ph.id}.jpg`;
-        const obj = await env.PHOTOS.put(key, res.body, { httpMetadata: { contentType: res.headers.get('content-type') || 'image/jpeg' } });
+        let data = res.body;                                   // same size as uploads: 1600 x 1200, compressed
+        if (env.IMAGES) { try { data = (await env.IMAGES.input(res.body).transform({ width: 1600, height: 1200, fit: 'cover' }).output({ format: 'image/jpeg', quality: 82 })).image(); } catch (e) { fails.push({ id: ph.id, error: 'resize: ' + e }); return null; } }
+        const obj = await env.PHOTOS.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
         bytes += obj.size || 0;
         return q('UPDATE photos SET r2_key=? WHERE id=?', key, ph.id);
       } catch (e) { fails.push({ id: ph.id, error: String(e.message || e) }); return null; }
