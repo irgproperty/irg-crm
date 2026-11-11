@@ -59,6 +59,11 @@ async function route(req, env, url, email, ctx) {
   const run = async (st) => { const r = await st.all(); reads += r.meta?.rows_read || 0; return r.results; };
   const all = (s, ...a) => run(q(s, ...a));
   const one = async (s, ...a) => (await run(q(s, ...a)))[0] ?? null;
+  const deleteProperty = async (id) => {
+    const keys = (await all("SELECT r2_key FROM photos WHERE property_id=? AND r2_key IS NOT NULL AND r2_key!='missing'", id)).map(x => x.r2_key);
+    await batch([q('UPDATE events SET property_id=NULL WHERE property_id=?', id), q('DELETE FROM properties WHERE id=?', id)]);
+    if (env.PHOTOS && keys.length) { try { await env.PHOTOS.delete(keys); } catch (e) {} }
+  };
   const batch = async (sts) => { const rs = await db.batch(sts); rs.forEach((r) => (reads += r.meta?.rows_read || 0)); return rs; };
   if (p !== '/usage' && (await currentReads(db)) > READ_HARD) return json({ error: 'Daily database read budget reached (protecting the free limit). It resets at 00:00 UTC.' }, 429);
   const res = await handle();
@@ -137,6 +142,28 @@ async function route(req, env, url, email, ctx) {
       FROM contacts c LEFT JOIN users u ON u.id=c.assigned_user_id ${where} ORDER BY c.id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
     const total = where ? null : (await stat('contacts_total', 3600, async () => (await one('SELECT COUNT(*) n FROM contacts')).n));
     return json({ total, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
+  }
+  if (p === '/contacts/bulk' && m === 'POST') {
+    const b = await body(), ids = (b.ids || []).map(Number).filter(Boolean).slice(0, 200);
+    if (!ids.length || b.action !== 'delete') return json({ error: 'bad request' }, 400);
+    await q(`DELETE FROM contacts WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids).run();
+    return json({ ok: ids.length });
+  }
+  if (p === '/contacts/export.csv' && m === 'GET') {
+    const s = url.searchParams, w = ['EXISTS (SELECT 1 FROM contact_emails e WHERE e.contact_id=c.id)'], a = [];
+    if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
+    if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
+    if (s.get('seller')) w.push('c.is_seller=1');
+    if (s.get('buyer')) w.push('c.is_buyer=1');
+    if (s.get('q')) { w.push('c.name LIKE ?'); a.push('%' + s.get('q') + '%'); }
+    const rows = await all(`SELECT c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,
+      (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
+      (SELECT phone FROM contact_phones WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) phone
+      FROM contacts c WHERE ${w.join(' AND ')} ORDER BY c.id`, ...a);
+    const cell = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    const out = ['Email Address,First Name,Last Name,Phone,Country,Source,Type,Added'];
+    for (const r of rows) { const parts = (r.name || '').trim().split(/\s+/), first = parts.shift() || '', last = parts.join(' '); out.push([r.email, first, last, r.phone, r.country, r.origin, [r.is_buyer ? 'Buyer' : '', r.is_seller ? 'Seller' : ''].filter(Boolean).join('/'), (r.created_at || '').slice(0, 10)].map(cell).join(',')); }
+    return new Response('\ufeff' + out.join('\r\n'), { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="irg-contacts-' + new Date().toISOString().slice(0, 10) + '.csv"' } });
   }
   if (p === '/contacts' && m === 'POST') {
     const b = await body();
@@ -217,10 +244,12 @@ async function route(req, env, url, email, ctx) {
     if (st === 'sold') w.push('sold=1'); else if (st) { w.push('status=?', 'sold=0'); a.push(st); }
     if (s.get('online')) w.push('visible_on_website=1');
     if (s.get('type')) { w.push('property_type=?'); a.push(s.get('type')); }
+    if (s.get('label')) { w.push('id IN (SELECT property_id FROM property_labels WHERE label_id=?)'); a.push(+s.get('label')); }
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
     const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
       (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
-      (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners
+      (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners,
+      (SELECT GROUP_CONCAT(l.name||':'||l.public, '|') FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE pl.property_id=p.id) labels
       FROM properties p ${where} ORDER BY CAST(reference AS INTEGER) DESC, id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
     return json({ total: null, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
   }
@@ -232,20 +261,41 @@ async function route(req, env, url, email, ctx) {
     await q(`INSERT INTO properties(${k.join(',')}) VALUES(${k.map(() => '?').join(',')})`, id, ...Object.values(d)).run();
     return json({ id });
   }
+  if (p === '/properties/bulk' && m === 'POST') {
+    const b = await body(), ids = (b.ids || []).map(Number).filter(Boolean).slice(0, 200);
+    if (!ids.length) return json({ error: 'nothing selected' }, 400);
+    const ph = ids.map(() => '?').join(',');
+    if (b.action === 'delete') { for (const id of ids) await deleteProperty(id); }
+    else {
+      const set = { inactive: "status='inactive'", active: "status='active',sold=0", sold: "sold=1,visible_on_website=0", hide: 'visible_on_website=0', show: 'visible_on_website=1', noexport: 'block_export=1', export: 'block_export=0' }[b.action];
+      if (!set) return json({ error: 'unknown action' }, 400);
+      await q(`UPDATE properties SET ${set} WHERE id IN (${ph})`, ...ids).run();
+    }
+    await q("DELETE FROM stats WHERE key LIKE 'photo%'").run();
+    return json({ ok: ids.length });
+  }
+  if (p === '/labels' && m === 'GET') return json(await all('SELECT l.*,(SELECT COUNT(*) FROM property_labels WHERE label_id=l.id) used FROM label_defs l ORDER BY public DESC,sort,name'));
+  if (p === '/labels' && m === 'POST') { const b = await body(); if (!b.name?.trim()) return json({ error: 'name required' }, 400); await q('INSERT OR IGNORE INTO label_defs(name,public,sort) VALUES(?,?,50)', b.name.trim(), b.public ? 1 : 0).run(); return json(await one('SELECT * FROM label_defs WHERE name=?', b.name.trim())); }
+  if ((r = p.match(/^\/labels\/(\d+)$/))) {
+    if (m === 'PUT') { const b = await body(); await q('UPDATE label_defs SET name=COALESCE(?,name),public=COALESCE(?,public) WHERE id=?', b.name || null, b.public ?? null, +r[1]).run(); return json({ ok: 1 }); }
+    if (m === 'DELETE') { await q('DELETE FROM label_defs WHERE id=?', +r[1]).run(); return json({ ok: 1 }); }
+  }
   if ((r = p.match(/^\/properties\/(\d+)$/))) {
     const id = +r[1];
+    if (m === 'DELETE') { await deleteProperty(id); return json({ ok: 1 }); }
     if (m === 'GET') {
       const pr = await one('SELECT * FROM properties WHERE id=?', id);
       if (!pr) return json({ error: 'not found' }, 404);
       delete pr.raw_json;
-      const [texts, features, photos, owners, notes] = await Promise.all([
+      const [texts, features, photos, owners, notes, labels] = await Promise.all([
         all('SELECT * FROM property_texts WHERE property_id=?', id),
         all('SELECT feature_id,value FROM property_features WHERE property_id=?', id),
         all('SELECT id,position,visible,source_url,r2_key FROM photos WHERE property_id=? ORDER BY position', id),
         all('SELECT o.contact_id id,c.name FROM property_owners o LEFT JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=?', id),
         all('SELECT n.*,u.name user FROM notes n LEFT JOIN users u ON u.id=n.user_id WHERE property_id=? ORDER BY created_at DESC', id),
+        all('SELECT label_id FROM property_labels WHERE property_id=?', id),
       ]);
-      return json({ ...pr, texts, features, photos, owners, notes });
+      return json({ ...pr, texts, features, photos, owners, notes, labels: labels.map(x => x.label_id) });
     }
     if (m === 'PUT') {
       const b = await body(), st = [];
@@ -254,6 +304,7 @@ async function route(req, env, url, email, ctx) {
         st.push(q('DELETE FROM property_features WHERE property_id=?', id));
         b.features.forEach(f => st.push(q('INSERT OR IGNORE INTO property_features VALUES(?,?,?)', id, f.feature_id, f.value ?? null)));
       }
+      if (b.labels) { st.push(q('DELETE FROM property_labels WHERE property_id=?', id)); b.labels.forEach(l => st.push(q('INSERT OR IGNORE INTO property_labels VALUES(?,?)', id, +l))); }
       if (b.texts) b.texts.forEach(t => st.push(q('INSERT INTO property_texts(property_id,lang,title,short_description,full_description) VALUES(?,?,?,?,?) ON CONFLICT(property_id,lang) DO UPDATE SET title=excluded.title,short_description=excluded.short_description,full_description=excluded.full_description', id, t.lang, t.title || null, t.short_description || null, t.full_description || null)));
       if (b.owners) { st.push(q('DELETE FROM property_owners WHERE property_id=?', id)); b.owners.forEach(o => st.push(q('INSERT OR IGNORE INTO property_owners VALUES(?,?,?)', id, o, null))); st.push(q('UPDATE contacts SET is_seller=1 WHERE id IN (' + (b.owners.length ? b.owners.map(() => '?').join(',') : 'NULL') + ')', ...b.owners)); }
       if (b.photos) b.photos.forEach((ph, i) => st.push(q('UPDATE photos SET position=?,visible=? WHERE id=? AND property_id=?', i + 1, ph.visible ? 1 : 0, ph.id, id)));
@@ -371,14 +422,15 @@ async function publicApi(req, env, url) {
     const ids = props.map(x => x.id);
     if (!ids.length) { await addReads(db, reads); return json([]); }
     const ph = ids.map(() => '?').join(',');
-    const [texts, photos, feats, users] = await Promise.all([
+    const [texts, photos, feats, users, lbls] = await Promise.all([
       all(`SELECT * FROM property_texts WHERE lang='en' AND property_id IN (${ph})`, ...ids),
       all(`SELECT property_id,source_url,r2_key FROM photos WHERE visible=1 AND (r2_key IS NULL OR r2_key!='missing') AND property_id IN (${ph}) ORDER BY property_id,position`, ...ids),
       all(`SELECT pf.property_id,pf.value,f.id,f.kind,f.grp,f.label_en,f.label_pt FROM property_features pf JOIN feature_defs f ON f.id=pf.feature_id WHERE f.active=1 AND pf.property_id IN (${ph})`, ...ids),
       all('SELECT id,name,email FROM users'),
+      all(`SELECT pl.property_id,l.name FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE l.public=1 AND pl.property_id IN (${ph}) ORDER BY l.sort`, ...ids),
     ]);
     const by = (rows) => rows.reduce((m, r) => ((m[r.property_id] ||= []).push(r), m), {});
-    const T = Object.fromEntries(texts.map(t => [t.property_id, t])), PH = by(photos), FE = by(feats), U = Object.fromEntries(users.map(u => [u.id, u]));
+    const T = Object.fromEntries(texts.map(t => [t.property_id, t])), PH = by(photos), FE = by(feats), LB = by(lbls), U = Object.fromEntries(users.map(u => [u.id, u]));
     const CATS = { general: 'Features', view: 'Views', orientation: 'Orientation', proximity: 'Nearby' };
     const out = props.map(r => {
       const t = T[r.id] || {}, type = TYPE_EN[r.property_type] || r.property_type || 'Property';
@@ -400,6 +452,7 @@ async function publicApi(req, env, url) {
         description: (t.full_description || t.short_description || '').split(/\n+/).map(x => x.trim()).filter(Boolean),
         glance, features: Object.entries(categories).map(([category, items]) => ({ category, items })), featuresFlat: fs.map(f => f.label_en || f.label_pt),
         photos: (PH[r.id] || []).map((x, i) => ({ url: x.r2_key ? `${url.origin}/api/public/img/${x.r2_key}` : x.source_url, alt: `${title}, photo ${i + 1}`, category: '' })),
+        labels: (LB[r.id] || []).map(x => x.name),
         video: null, floorplan: null, agent: null, featured: false,
         publishedAt: published, updatedAt: null,
       };
