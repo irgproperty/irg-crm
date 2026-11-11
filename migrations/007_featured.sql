@@ -1,0 +1,1 @@
+ALTER TABLE properties ADD COLUMN featured INTEGER DEFAULT 0;

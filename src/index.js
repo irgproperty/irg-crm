@@ -4,7 +4,7 @@ import { parseLead } from './inbound.js';
 import PostalMime from 'postal-mime';
 // IRG CRM API. Auth: put the whole site behind Cloudflare Access; the worker trusts its header.
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: { 'content-type': 'application/json' } });
-const PROP_FIELDS = ['reference','status','status_reason','sold','visible_on_website','block_export','exclusive','pre_off_market','business_type','property_type','typology','condition','price','price_to','price_visible','bedrooms','bathrooms','area_house','area_land','area_gross','country','district','city','locality','zone','zipcode','address','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee','energy_rating','energy_cert_number','habitation_licence','registry_number','contract_number','contract_start','contract_end','commission','internal_name','key_notes','internal_notes','broker_user_id'];
+const PROP_FIELDS = ['reference','status','status_reason','sold','visible_on_website','block_export','exclusive','featured','pre_off_market','business_type','property_type','typology','condition','price','price_to','price_visible','bedrooms','bathrooms','area_house','area_land','area_gross','country','district','city','locality','zone','zipcode','address','latitude','longitude','year_built','year_renovated','floors','imi_value','condo_fee','energy_rating','energy_cert_number','habitation_licence','registry_number','contract_number','contract_start','contract_end','commission','internal_name','key_notes','internal_notes','broker_user_id'];
 const CONTACT_FIELDS = ['name','country','origin','assigned_user_id','language','active','gdpr_consent','gdpr_consent_date','is_seller','is_buyer','next_event'];
 const now = () => new Date().toISOString().slice(0, 16);
 const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k] === '' ? null : o[k]]));
@@ -134,8 +134,7 @@ async function route(req, env, url, email, ctx) {
     }
     if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
     if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
-    if (s.get('seller')) w.push('c.is_seller=1');
-    if (s.get('buyer')) w.push('c.is_buyer=1');
+    if (s.get('seller') && s.get('buyer')) w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (s.get('seller')) w.push('c.is_seller=1'); else if (s.get('buyer')) w.push('c.is_buyer=1');
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
     const rows0 = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
@@ -146,16 +145,16 @@ async function route(req, env, url, email, ctx) {
   }
   if (p === '/contacts/bulk' && m === 'POST') {
     const b = await body(), ids = (b.ids || []).map(Number).filter(Boolean).slice(0, 200);
-    if (!ids.length || b.action !== 'delete') return json({ error: 'bad request' }, 400);
-    await q(`DELETE FROM contacts WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids).run();
+    const ph = ids.map(() => '?').join(','), set = { buyer: 'is_buyer=1', notbuyer: 'is_buyer=0', seller: 'is_seller=1', notseller: 'is_seller=0' }[b.action];
+    if (!ids.length || (b.action !== 'delete' && !set)) return json({ error: 'bad request' }, 400);
+    if (set) await q(`UPDATE contacts SET ${set} WHERE id IN (${ph})`, ...ids).run(); else await q(`DELETE FROM contacts WHERE id IN (${ph})`, ...ids).run();
     return json({ ok: ids.length });
   }
   if (p === '/contacts/export.csv' && m === 'GET') {
     const s = url.searchParams, w = ['EXISTS (SELECT 1 FROM contact_emails e WHERE e.contact_id=c.id)'], a = [];
     if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
     if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
-    if (s.get('seller')) w.push('c.is_seller=1');
-    if (s.get('buyer')) w.push('c.is_buyer=1');
+    if (s.get('seller') && s.get('buyer')) w.push('(c.is_seller=1 OR c.is_buyer=1)'); else if (s.get('seller')) w.push('c.is_seller=1'); else if (s.get('buyer')) w.push('c.is_buyer=1');
     if (s.get('q')) { w.push('c.name LIKE ?'); a.push('%' + s.get('q') + '%'); }
     const rows = await all(`SELECT c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
@@ -242,12 +241,14 @@ async function route(req, env, url, email, ctx) {
     const term = (s.get('q') || '').trim();
     if (term) { w.push('(reference LIKE ? OR city LIKE ? OR locality LIKE ? OR zone LIKE ? OR internal_name LIKE ? OR id=?)'); const l = '%' + term + '%'; a.push(l, l, l, l, l, +term || -1); }
     const st = s.get('status');
-    if (st === 'sold') w.push('sold=1'); else if (st) { w.push('status=?', 'sold=0'); a.push(st); }
+    if (st === 'live') w.push("status='active'", 'sold=0', 'visible_on_website=1');
+    else if (st === 'sold') w.push('sold=1'); else if (st) { w.push('status=?', 'sold=0'); a.push(st); }
     if (s.get('online')) w.push('visible_on_website=1');
+    if (s.get('featured')) w.push('featured=1');
     if (s.get('type')) { w.push('property_type=?'); a.push(s.get('type')); }
     if (s.get('label')) { w.push('id IN (SELECT property_id FROM property_labels WHERE label_id=?)'); a.push(+s.get('label')); }
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
-    const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
+    const rows0 = await all(`SELECT p.id,p.reference,p.status,p.sold,p.visible_on_website,p.featured,p.property_type,p.typology,p.city,p.locality,p.zone,p.price,p.bedrooms,p.created_at,
       (SELECT source_url FROM photos WHERE property_id=p.id AND visible=1 ORDER BY position LIMIT 1) photo,
       (SELECT GROUP_CONCAT(c.name, ', ') FROM property_owners o JOIN contacts c ON c.id=o.contact_id WHERE o.property_id=p.id) owners,
       (SELECT GROUP_CONCAT(l.name||'~'||l.public||'~'||COALESCE(l.color,''), '|') FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE pl.property_id=p.id) labels
@@ -268,7 +269,7 @@ async function route(req, env, url, email, ctx) {
     const ph = ids.map(() => '?').join(',');
     if (b.action === 'delete') { for (const id of ids) await deleteProperty(id); }
     else {
-      const set = { inactive: "status='inactive'", active: "status='active',sold=0", sold: "sold=1,visible_on_website=0", hide: 'visible_on_website=0', show: 'visible_on_website=1', noexport: 'block_export=1', export: 'block_export=0' }[b.action];
+      const set = { inactive: "status='inactive'", active: "status='active',sold=0", sold: "sold=1,visible_on_website=0", hide: 'visible_on_website=0', show: 'visible_on_website=1', noexport: 'block_export=1', export: 'block_export=0', feature: 'featured=1', unfeature: 'featured=0' }[b.action];
       if (!set) return json({ error: 'unknown action' }, 400);
       await q(`UPDATE properties SET ${set} WHERE id IN (${ph})`, ...ids).run();
     }
@@ -435,10 +436,10 @@ async function recordLead(db, b) {
   let reads = 0, created = false;
   const c = await db.prepare('SELECT contact_id id FROM contact_emails WHERE email=? LIMIT 1').bind(email).first();
   let id;
-  if (c) id = c.id;
+  if (c) { id = c.id; await db.prepare('UPDATE contacts SET is_buyer=1 WHERE id=? AND is_seller=0 AND is_buyer=0').bind(id).run(); }
   else {
     id = (await db.prepare('SELECT COALESCE(MAX(id),0)+1 n FROM contacts').first()).n; created = true;
-    const st = [db.prepare("INSERT INTO contacts(id,name,origin,created_at,created_reliable,gdpr_consent,gdpr_consent_date) VALUES(?,?,?,?,1,1,?)").bind(id, name, origin, nowIso, nowIso),
+    const st = [db.prepare("INSERT INTO contacts(id,name,origin,created_at,created_reliable,gdpr_consent,gdpr_consent_date,is_buyer) VALUES(?,?,?,?,1,1,?,1)").bind(id, name, origin, nowIso, nowIso),
       db.prepare('INSERT INTO contact_emails(contact_id,email,is_primary) VALUES(?,?,1)').bind(id, email)];
     if (phone) st.push(db.prepare('INSERT INTO contact_phones(contact_id,phone,phone_raw,is_primary) VALUES(?,?,?,1)').bind(id, phone, phone));
     await db.batch(st);
@@ -519,7 +520,7 @@ async function publicApi(req, env, url) {
         glance, features: Object.entries(categories).map(([category, items]) => ({ category, items })), featuresFlat: fs.map(f => f.label_en || f.label_pt),
         photos: (PH[r.id] || []).map((x, i) => ({ url: x.r2_key ? `${url.origin}/api/public/img/${x.r2_key}?v=${wmv}` : x.source_url, alt: `${title}, photo ${i + 1}`, category: '' })),
         labels: (LB[r.id] || []).map(x => x.name),
-        video: null, floorplan: null, agent: null, featured: false,
+        video: null, floorplan: null, agent: null, featured: !!r.featured,
         publishedAt: published, updatedAt: null,
       };
     });
