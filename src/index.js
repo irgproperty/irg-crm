@@ -129,8 +129,8 @@ async function route(req, env, url, email, ctx) {
     if (term) {
       const like = '%' + term + '%';
       const dig = term.replace(/[^\d]/g, '');
-      w.push('(c.name LIKE ? OR c.id IN (SELECT contact_id FROM contact_emails WHERE email LIKE ?) OR c.id = ?' + (dig.length >= 5 ? ' OR c.id IN (SELECT contact_id FROM contact_phones WHERE phone LIKE ?)' : '') + ')');
-      a.push(like, like, +term || -1); if (dig.length >= 5) a.push('%' + dig + '%');
+      w.push('(c.name LIKE ? OR c.id IN (SELECT contact_id FROM contact_emails WHERE email LIKE ?) OR c.id = ?' + (dig.length >= 5 ? ' OR c.id IN (SELECT contact_id FROM contact_phones WHERE phone LIKE ?)' : '') + ' OR c.id IN (SELECT contact_id FROM contact_refs WHERE reference=?) OR c.id IN (SELECT o.contact_id FROM property_owners o JOIN properties p ON p.id=o.property_id WHERE p.reference=?))');
+      a.push(like, like, +term || -1); if (dig.length >= 5) a.push('%' + dig + '%'); a.push(term.toUpperCase(), term);
     }
     if (s.get('origin')) { w.push('c.origin=?'); a.push(s.get('origin')); }
     if (s.get('user')) { w.push('c.assigned_user_id=?'); a.push(+s.get('user')); }
@@ -138,7 +138,9 @@ async function route(req, env, url, email, ctx) {
     const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
     const rows0 = await all(`SELECT c.id,c.name,c.country,c.origin,c.is_seller,c.is_buyer,c.created_at,c.active,u.name AS user,
       (SELECT email FROM contact_emails WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) email,
-      (SELECT phone FROM contact_phones WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) phone
+      (SELECT phone FROM contact_phones WHERE contact_id=c.id ORDER BY is_primary DESC LIMIT 1) phone,
+      (SELECT GROUP_CONCAT(p.reference, ',') FROM property_owners o JOIN properties p ON p.id=o.property_id WHERE o.contact_id=c.id) owned_refs,
+      (SELECT GROUP_CONCAT(reference, ',') FROM contact_refs WHERE contact_id=c.id) enq_refs
       FROM contacts c LEFT JOIN users u ON u.id=c.assigned_user_id ${where} ORDER BY c.id DESC LIMIT ? OFFSET ?`, ...a, per + 1, (page - 1) * per);
     const total = where ? null : (await stat('contacts_total', 3600, async () => (await one('SELECT COUNT(*) n FROM contacts')).n));
     return json({ total, hasMore: rows0.length > per, page, per, rows: rows0.slice(0, per) });
@@ -189,8 +191,9 @@ async function route(req, env, url, email, ctx) {
         all('SELECT * FROM searches WHERE contact_id=? ORDER BY id DESC', id),
         all('SELECT * FROM events WHERE contact_id=? ORDER BY COALESCE(due_at,"") DESC', id),
       ]);
+      const enq = await all('SELECT r.reference,(SELECT id FROM properties WHERE reference=r.reference LIMIT 1) property_id FROM contact_refs r WHERE r.contact_id=?', id);
       const dups = await all('SELECT DISTINCT c.id,c.name FROM contact_emails e JOIN contact_emails f ON f.email=e.email AND f.contact_id<>e.contact_id JOIN contacts c ON c.id=f.contact_id WHERE e.contact_id=?', id);
-      return json({ ...c, emails, phones, notes, owned, searches, events, duplicates: dups });
+      return json({ ...c, emails, phones, notes, owned, enquired: enq, searches, events, duplicates: dups });
     }
     if (m === 'PUT') {
       const b = await body(), st = [];
@@ -446,6 +449,7 @@ async function recordLead(db, b) {
   }
   let pid = null;
   if (b.reference) pid = (await db.prepare('SELECT id FROM properties WHERE reference=? LIMIT 1').bind(String(b.reference)).first())?.id || null;
+  if (b.reference) await db.prepare('INSERT OR IGNORE INTO contact_refs(contact_id,reference) VALUES(?,?)').bind(id, String(b.reference).toUpperCase().slice(0, 24)).run();
   const title = b.title || (b.reference ? `Enquiry ${b.reference}` : `${origin} enquiry`);
   const extra = [b.url, b.portalRef && !b.url ? `Portal ref ${b.portalRef}` : ''].filter(Boolean).join('\n');
   await db.batch([
