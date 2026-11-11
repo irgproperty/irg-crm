@@ -1,3 +1,4 @@
+import { getWm, clearWm, stamp } from './photos.js';
 import { feedApi } from './feeds.js';
 import { parseLead } from './inbound.js';
 import PostalMime from 'postal-mime';
@@ -274,6 +275,51 @@ async function route(req, env, url, email, ctx) {
     await q("DELETE FROM stats WHERE key LIKE 'photo%'").run();
     return json({ ok: ids.length });
   }
+  if ((r = p.match(/^\/photos\/(\d+)\/file$/)) && m === 'GET') {          // original (default), stamped (?wm=1) or download (?dl=1)
+    const ph = await one('SELECT p.*,pr.reference FROM photos p JOIN properties pr ON pr.id=p.property_id WHERE p.id=?', +r[1]);
+    if (!ph) return json({ error: 'not found' }, 404);
+    let src;
+    if (ph.r2_key && ph.r2_key !== 'missing') { const o = await env.PHOTOS.get(ph.r2_key); src = o && o.body; }
+    else if (ph.source_url) { const f = await fetch(ph.source_url.split('?')[0]); src = f.ok ? f.body : null; }
+    if (!src) return json({ error: 'file not available' }, 404);
+    const want = url.searchParams.get('wm') === '1';
+    let body = src, type = 'image/jpeg';
+    if (want) { const out = await stamp(env, url.origin, src, 2400, { ...(await getWm(env)), on: 1 }); if (!out) return json({ error: 'watermark not available' }, 500); body = out; }
+    const h = { 'content-type': type, 'cache-control': 'private, max-age=600' };
+    if (url.searchParams.get('dl')) h['content-disposition'] = `attachment; filename="IRG-${ph.reference}-${ph.position}${want ? '' : '-original'}.jpg"`;
+    return new Response(body, { headers: h });
+  }
+  if ((r = p.match(/^\/photos\/(\d+)$/)) && m === 'DELETE') {
+    const ph = await one('SELECT r2_key FROM photos WHERE id=?', +r[1]);
+    await q('DELETE FROM photos WHERE id=?', +r[1]).run();
+    if (ph && ph.r2_key && ph.r2_key !== 'missing' && env.PHOTOS) { try { await env.PHOTOS.delete(ph.r2_key); } catch (e) {} }
+    return json({ ok: 1 });
+  }
+  if ((r = p.match(/^\/properties\/(\d+)\/photos$/)) && m === 'POST') {       // one resized JPEG per request
+    const id = +r[1]; if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
+    const buf = await req.arrayBuffer(); if (!buf.byteLength || buf.byteLength > 12e6) return json({ error: 'photo missing or over 12 MB' }, 400);
+    const pos = ((await one('SELECT COALESCE(MAX(position),0) n FROM photos WHERE property_id=?', id)).n) + 1;
+    const nid = ((await one('SELECT COALESCE(MAX(id),0)+1 n FROM photos')).n);
+    const key = `p/${id}/${nid}.jpg`;
+    await env.PHOTOS.put(key, buf, { httpMetadata: { contentType: 'image/jpeg' } });
+    await q('INSERT INTO photos(id,property_id,position,visible,r2_key) VALUES(?,?,?,1,?)', nid, id, pos, key).run();
+    return json({ id: nid });
+  }
+  if (p === '/settings/watermark' && m === 'GET') return json({ ...(await getWm(env)), hasLogo: !!(env.PHOTOS && await env.PHOTOS.head('settings/wm.png')), images: !!env.IMAGES });
+  if (p === '/settings/watermark' && m === 'PUT') {
+    const b = await body(), cur = await getWm(env);
+    const v = { on: b.on ? 1 : 0, opacity: Math.min(0.9, Math.max(0.05, +b.opacity || cur.opacity)), size: Math.min(0.6, Math.max(0.08, +b.size || cur.size)), v: Date.now() };
+    await q("INSERT INTO app_settings(key,value) VALUES('watermark',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(v)).run(); clearWm();
+    return json(v);
+  }
+  if (p === '/settings/watermark/logo' && m === 'GET') { const o = env.PHOTOS && await env.PHOTOS.get('settings/wm.png'); return o ? new Response(o.body, { headers: { 'content-type': 'image/png', 'cache-control': 'no-cache' } }) : new Response('none', { status: 404 }); }
+  if (p === '/settings/watermark/logo' && m === 'POST') {
+    if (!env.PHOTOS) return json({ error: 'R2 bucket not bound' }, 400);
+    const buf = await req.arrayBuffer(); if (!buf.byteLength || buf.byteLength > 4e6) return json({ error: 'logo missing or over 4 MB' }, 400);
+    await env.PHOTOS.put('settings/wm.png', buf, { httpMetadata: { contentType: 'image/png' } });
+    const cur = await getWm(env); await q("UPDATE app_settings SET value=? WHERE key='watermark'", JSON.stringify({ ...cur, v: Date.now() })).run(); clearWm();
+    return json({ ok: 1 });
+  }
   if (p === '/labels' && m === 'GET') return json(await all('SELECT l.*,(SELECT COUNT(*) FROM property_labels WHERE label_id=l.id) used FROM label_defs l ORDER BY public DESC,sort,name'));
   if (p === '/labels' && m === 'POST') { const b = await body(); if (!b.name?.trim()) return json({ error: 'name required' }, 400); await q('INSERT OR IGNORE INTO label_defs(name,public,sort,color) VALUES(?,?,50,?)', b.name.trim(), b.public ? 1 : 0, /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#C9A96E').run(); return json(await one('SELECT * FROM label_defs WHERE name=?', b.name.trim())); }
   if ((r = p.match(/^\/labels\/(\d+)$/))) {
@@ -414,13 +460,13 @@ async function publicApi(req, env, url) {
     const o = await env.PHOTOS.get(k);
     if (!o) return new Response('not found', { status: 404 });
     const hdr = { 'cache-control': 'public, max-age=31536000, immutable' };
-    if (env.IMAGES && url.searchParams.get('raw') !== env.SITE_KEY) {      // stamp the IRG logo in the middle of every photo
-      const ck = new Request(url.origin + '/__wm/' + k), cache = caches.default;
+    const wm = await getWm(env);
+    if (wm.on && env.IMAGES) {
+      const ck = new Request(url.origin + '/__wm/' + wm.v + '/' + k), cache = caches.default;
       const hit = await cache.match(ck); if (hit) return hit;
       try {
-        const logo = await env.ASSETS.fetch(new Request(url.origin + '/wm.png'));
-        const out = await env.IMAGES.input(o.body).transform({ width: 1600 }).draw(logo.body, { opacity: 0.3 }).output({ format: 'image/jpeg', quality: 85 });
-        const res = new Response(out.image(), { headers: { 'content-type': 'image/jpeg', ...hdr } });
+        const out = await stamp(env, url.origin, o.body, 1600, wm);
+        const res = new Response(out, { headers: { 'content-type': 'image/jpeg', ...hdr } });
         await cache.put(ck, res.clone()); return res;
       } catch (e) { console.log('watermark failed', k, String(e)); const o2 = await env.PHOTOS.get(k); return new Response(o2.body, { headers: { 'content-type': o2.httpMetadata?.contentType || 'image/jpeg', 'cache-control': 'public, max-age=300' } }); }
     }
@@ -446,6 +492,7 @@ async function publicApi(req, env, url) {
       all('SELECT id,name,email FROM users'),
       all(`SELECT pl.property_id,l.name,l.color FROM property_labels pl JOIN label_defs l ON l.id=pl.label_id WHERE l.public=1 AND pl.property_id IN (${ph}) ORDER BY l.sort`, ...ids),
     ]);
+    const wmv = (await getWm(env)).v;
     const by = (rows) => rows.reduce((m, r) => ((m[r.property_id] ||= []).push(r), m), {});
     const T = Object.fromEntries(texts.map(t => [t.property_id, t])), PH = by(photos), FE = by(feats), LB = by(lbls), U = Object.fromEntries(users.map(u => [u.id, u]));
     const CATS = { general: 'Features', view: 'Views', orientation: 'Orientation', proximity: 'Nearby' };
@@ -468,7 +515,7 @@ async function publicApi(req, env, url) {
         location: { area, city: tidy(r.city), region: 'Algarve', lat: r.latitude || null, lng: r.longitude || null },
         description: (t.full_description || t.short_description || '').split(/\n+/).map(x => x.trim()).filter(Boolean),
         glance, features: Object.entries(categories).map(([category, items]) => ({ category, items })), featuresFlat: fs.map(f => f.label_en || f.label_pt),
-        photos: (PH[r.id] || []).map((x, i) => ({ url: x.r2_key ? `${url.origin}/api/public/img/${x.r2_key}` : x.source_url, alt: `${title}, photo ${i + 1}`, category: '' })),
+        photos: (PH[r.id] || []).map((x, i) => ({ url: x.r2_key ? `${url.origin}/api/public/img/${x.r2_key}?v=${wmv}` : x.source_url, alt: `${title}, photo ${i + 1}`, category: '' })),
         labels: (LB[r.id] || []).map(x => x.name),
         video: null, floorplan: null, agent: null, featured: false,
         publishedAt: published, updatedAt: null,
